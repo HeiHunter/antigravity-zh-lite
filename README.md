@@ -9,6 +9,14 @@
 
 ---
 
+## 效果预览
+
+| 设置面板（常规 / 权限 / 输入框） | 自定义配置与插件市场 |
+| :---: | :---: |
+| ![设置面板中文界面](./assets/screenshot-settings.png) | ![插件市场中文界面](./assets/screenshot-marketplace.jpg) |
+
+---
+
 ## 核心特性
 
 - **极度轻量化（零 `node_modules`）**：纯原生 Node.js（≥ 22），无需 `npm install`，解压或克隆即用；注入客户端的单文件内核（含完整 700+ 词库与悬浮 UI）仅 ~84 KB（gzip 后 ~26 KB）。
