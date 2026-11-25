@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -9,15 +10,32 @@ import { createDynamicQueue } from '../src/core/dynamic.js';
 import { createDomTranslator } from '../src/core/walker.js';
 import { createCollector } from '../src/core/collector.js';
 import { isAntigravityUiTarget, isChromiumCdpVersion } from '../src/cdp/client.js';
-import { formatUploadModeLabel, handleCollectedUpload, loadConfig } from '../src/cdp/uploader.js';
+import {
+  filterRemoteSafeEntries,
+  formatUploadModeLabel,
+  handleCollectedUpload,
+  loadConfig,
+} from '../src/cdp/uploader.js';
 import {
   createDynamicTranslator,
+  createSemaphore,
   isValidDynamicKey,
   redactSensitiveTokens,
   restoreSensitiveTokens,
 } from '../src/cdp/translator.js';
-import { parseMacScutilProxy, parseWinRegProxy, smartFetch } from '../src/cdp/proxy.js';
-import { parseMacEtimeToSeconds } from '../src/cdp/launcher.js';
+import {
+  parseMacScutilProxy,
+  parseWinRegProxy,
+  requestViaHttpProxy,
+  smartFetch,
+} from '../src/cdp/proxy.js';
+import {
+  applyMainFrameNavigation,
+  createAutoFollowController,
+  isAllowedBridgeCall,
+  parseMacEtimeToSeconds,
+  refreshSessionOnHotReload,
+} from '../src/cdp/launcher.js';
 import { createMacLauncherApp, generateLaunchAgentPlist } from '../src/macos/service.js';
 import { generateWinDaemonVbs, generateWinShortcutScript } from '../src/win/service.js';
 import { collectReleaseFiles } from '../scripts/pack-release.js';
@@ -210,12 +228,12 @@ test('cdp target filter: allows Antigravity UI targets and blocks dev previews, 
     }),
     true
   );
-  // Arbitrary local HTML file must NOT be injected
+  // Arbitrary local HTML file must NOT be injected even if title spoofs "Antigravity"
   assert.equal(
     isAntigravityUiTarget({
       type: 'page',
       url: 'file:///Users/alice/projects/demo/index.html',
-      title: 'My Demo',
+      title: 'Antigravity Demo',
       webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/1b',
     }),
     false
@@ -229,25 +247,53 @@ test('cdp target filter: allows Antigravity UI targets and blocks dev previews, 
     }),
     true
   );
-  // Plain http://localhost dev server preview must NOT be injected
+  // Host prefix spoofing & user HTTPS localhost dev server must NOT be injected
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'https://127.0.0.1.evil.com:8443/chat',
+      title: 'Antigravity',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2a',
+    }),
+    false
+  );
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'https://localhost:5173/dashboard',
+      title: 'Antigravity Preview',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2aa',
+    }),
+    false
+  );
+  // Plain http://localhost dev server preview must NOT be injected even with spoofed title
   assert.equal(
     isAntigravityUiTarget({
       type: 'page',
       url: 'http://localhost:3000/dashboard',
-      title: 'Vite App',
+      title: 'Workspace - Antigravity',
       webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2b',
     }),
     false
   );
-  // Cross-version fallback: plain http://localhost allowed ONLY when title explicitly names Antigravity
+  // Cross-version HTTP fallback requires 127.0.0.1 + port + Antigravity path + Antigravity title
   assert.equal(
     isAntigravityUiTarget({
       type: 'page',
-      url: 'http://localhost:3000/chat',
+      url: 'http://127.0.0.1:60912/c/abc-123',
       title: 'Workspace - Antigravity',
       webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2c',
     }),
     true
+  );
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'http://127.0.0.1:3000/admin/users',
+      title: 'Antigravity Admin',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2d',
+    }),
+    false
   );
   assert.equal(
     isAntigravityUiTarget({
@@ -727,4 +773,308 @@ test('release packager: excludes private caches, local config, and personal file
   assert.ok(!files.some((f) => f.startsWith('dicts/_')));
   assert.ok(!files.includes('ag-zh.config.json'));
   assert.ok(!files.some((f) => f.endsWith('.DS_Store')));
+});
+
+test('cdp session lifecycle: navigation, execution context isolation, and hot-reload preload refresh', async () => {
+  const session = {
+    url: 'https://127.0.0.1:60912/c/conv-1',
+    title: 'Antigravity',
+    mainFrameId: 'frame-main',
+    mainContextId: 7,
+    newDocScriptId: 'script-v1',
+    client: null,
+  };
+
+  // Matching top-level default execution context is allowed
+  assert.equal(
+    isAllowedBridgeCall(session, {
+      name: '__AG_ZH_BRIDGE__',
+      payload: JSON.stringify({ type: 'translate_dynamic', texts: [] }),
+      executionContextId: 7,
+    }),
+    true
+  );
+
+  // Non-main execution context (e.g. child iframe or isolated world) is rejected
+  assert.equal(
+    isAllowedBridgeCall(session, {
+      name: '__AG_ZH_BRIDGE__',
+      payload: JSON.stringify({ type: 'translate_dynamic', texts: [] }),
+      executionContextId: 99,
+    }),
+    false
+  );
+
+  // Oversized payload (> 256 KB) is rejected
+  assert.equal(
+    isAllowedBridgeCall(session, {
+      name: '__AG_ZH_BRIDGE__',
+      payload: 'x'.repeat(260 * 1024),
+      executionContextId: 7,
+    }),
+    false
+  );
+
+  // Child frame navigation must NOT alter main session URL
+  assert.equal(
+    applyMainFrameNavigation(session, {
+      frame: { id: 'frame-child', parentId: 'frame-main', url: 'https://evil.example/' },
+    }),
+    false
+  );
+  assert.equal(session.url, 'https://127.0.0.1:60912/c/conv-1');
+
+  // Top-level navigation to external page blocks both re-injection and bridge calls
+  assert.equal(
+    applyMainFrameNavigation(session, {
+      frame: { id: 'frame-main', url: 'https://github.com/HeiHunter/antigravity-zh-lite' },
+    }),
+    false
+  );
+  assert.equal(
+    isAllowedBridgeCall(session, {
+      name: '__AG_ZH_BRIDGE__',
+      payload: JSON.stringify({ type: 'translate_dynamic', texts: [] }),
+      executionContextId: 7,
+    }),
+    false
+  );
+
+  // Hot-reload revokes old preload script before registering new preload script and updates live dict
+  const calls = [];
+  session.client = {
+    isOpen: () => true,
+    async send(method, params) {
+      calls.push({ method, params });
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+        return { identifier: 'script-v2' };
+      }
+      return { result: { value: true } };
+    },
+  };
+  const reloaded = await refreshSessionOnHotReload(session, '/* v2 */', '{"exact":{"Hi":"你好"}}');
+  assert.equal(reloaded, true);
+  assert.equal(session.newDocScriptId, 'script-v2');
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    [
+      'Page.removeScriptToEvaluateOnNewDocument',
+      'Page.addScriptToEvaluateOnNewDocument',
+      'Runtime.evaluate',
+    ]
+  );
+  assert.equal(calls[0].params.identifier, 'script-v1');
+  assert.equal(calls[1].params.source, '/* v2 */');
+});
+
+test('translator: no implicit cross-provider fallback and bounded semaphore queue', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-zh-nofallback-'));
+  const origFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    return {
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      async text() {
+        return 'upstream error';
+      },
+    };
+  };
+  try {
+    const sample = 'The command modifies files outside the workspace directory safely.';
+    const t = createDynamicTranslator({ rootDir: tmpRoot });
+
+    // OpenAI failure must NEVER silently fall back to Google or MyMemory
+    const rOpenAi = await t.translateTexts([sample], {
+      dynamicTranslate: { enabled: true, provider: 'openai', apiKey: 'sk-test-only', proxy: 'none' },
+    });
+    assert.deepEqual(rOpenAi.translations, {});
+    assert.ok(requestedUrls.length > 0 && requestedUrls.every((u) => u.includes('/chat/completions')));
+    assert.ok(!requestedUrls.some((u) => u.includes('translate.googleapis.com') || u.includes('mymemory')));
+
+    requestedUrls.length = 0;
+    // Gemini failure must NEVER silently fall back to Google Translate or MyMemory
+    const rGemini = await t.translateTexts([sample], {
+      dynamicTranslate: { enabled: true, provider: 'gemini', apiKey: 'test-key', proxy: 'none' },
+    });
+    assert.deepEqual(rGemini.translations, {});
+    assert.ok(requestedUrls.length > 0 && requestedUrls.every((u) => u.includes('generativelanguage.googleapis.com')));
+    assert.ok(!requestedUrls.some((u) => u.includes('translate.googleapis.com') || u.includes('mymemory')));
+
+    requestedUrls.length = 0;
+    // Google failure must NEVER silently fall back to MyMemory
+    const rGoogle = await t.translateTexts([sample], {
+      dynamicTranslate: { enabled: true, provider: 'google', proxy: 'none' },
+    });
+    assert.deepEqual(rGoogle.translations, {});
+    assert.ok(requestedUrls.length > 0 && requestedUrls.every((u) => u.includes('translate.googleapis.com')));
+    assert.ok(!requestedUrls.some((u) => u.includes('mymemory')));
+
+    // Semaphore rejects excess tasks once waiting queue reaches maxQueueSize
+    const withPermit = createSemaphore(1, 2);
+    let releaseFirst;
+    const holdFirst = withPermit(() => new Promise((r) => { releaseFirst = r; }));
+    const queued1 = withPermit(async () => 'q1');
+    const queued2 = withPermit(async () => 'q2');
+    await assert.rejects(() => withPermit(async () => 'overflow'), /queue full/i);
+    releaseFirst('first');
+    assert.deepEqual(await Promise.all([holdFirst, queued1, queued2]), ['first', 'q1', 'q2']);
+  } finally {
+    globalThis.fetch = origFetch;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('uploader: filters embedded sensitive entries before remote upload without altering local save', async () => {
+  const { safe, filteredCount } = filterRemoteSafeEntries({
+    'Open Command Palette': '',
+    'Inspect ~/Library/LaunchAgents/com.test.plist now': '',
+    'Contact alice@example.com for token ghp_1234567890abcdef1234': '',
+  });
+  assert.deepEqual(safe, { 'Open Command Palette': '' });
+  assert.equal(filteredCount, 2);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-zh-sens-'));
+  try {
+    const res = await handleCollectedUpload({
+      rootDir: tmpRoot,
+      payload: { exact: { 'Read /Users/alice/secret.env file': '' } },
+      config: { upload: { mode: 'webhook', webhookUrl: 'http://127.0.0.1:1/never-called' } },
+    });
+    assert.equal(res.remoteStatus, 'skipped-sensitive');
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('proxy tunnel: destroys hanging HTTP CONNECT socket cleanly on timeout', async () => {
+  let serverPeerEnded = false;
+  const openSockets = new Set();
+  const proxyServer = http.createServer();
+  proxyServer.on('connect', (_req, clientSocket) => {
+    openSockets.add(clientSocket);
+    clientSocket.on('end', () => {
+      serverPeerEnded = true;
+      clientSocket.end();
+    });
+    clientSocket.on('close', () => {
+      serverPeerEnded = true;
+      openSockets.delete(clientSocket);
+    });
+    clientSocket.resume();
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    // Intentionally stall without completing TLS handshake
+  });
+
+  await new Promise((resolve) => proxyServer.listen(0, '127.0.0.1', resolve));
+  const addr = proxyServer.address();
+  const proxyUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    await assert.rejects(
+      () => requestViaHttpProxy('https://example.invalid/slow', {}, proxyUrl, 60),
+      /Proxy request timeout/
+    );
+    for (let i = 0; i < 20 && !serverPeerEnded; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(serverPeerEnded, true, 'Expected hanging proxy tunnel socket to be destroyed on timeout');
+  } finally {
+    for (const s of openSockets) s.destroy();
+    proxyServer.close();
+  }
+});
+
+test('auto-follow controller: handles query errors, pre-existing PIDs, grace-period races, and single-PID kill', async () => {
+  const killed = [];
+  let spawned = 0;
+  let cdpOpen = false;
+  let currentProcs = [{ pid: 100, uptimeSec: 200, args: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' }];
+  let fakeNow = 100000;
+
+  const ctrl = createAutoFollowController({
+    getProcs: async () => currentProcs,
+    isCdpOpen: async () => cdpOpen,
+    quitByPid: async (pid) => {
+      killed.push(pid);
+      return true;
+    },
+    spawnApp: () => {
+      spawned++;
+    },
+    sleep: async () => {},
+    now: () => fakeNow,
+    initialPids: [100],
+    log: () => {},
+    warn: () => {},
+  });
+
+  // Query error (null) must NOT clear ignoredPreExistingPids
+  currentProcs = null;
+  await ctrl.check();
+  assert.equal(ctrl.ignoredPreExistingPids.has(100), true);
+
+  // Old process (> 15s uptime) is never killed
+  currentProcs = [{ pid: 101, uptimeSec: 60, args: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' }];
+  await ctrl.check();
+  assert.deepEqual(killed, []);
+
+  // Grace-period race: CDP opens while waiting -> abort quit
+  let step = 0;
+  const raceCtrl = createAutoFollowController({
+    getProcs: async () => [{ pid: 202, uptimeSec: 2, args: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' }],
+    isCdpOpen: async () => step > 0,
+    quitByPid: async (pid) => {
+      killed.push(pid);
+      return true;
+    },
+    spawnApp: () => {
+      spawned++;
+    },
+    sleep: async () => {
+      step++;
+    },
+    now: () => 200000,
+    log: () => {},
+    warn: () => {},
+  });
+  await raceCtrl.check();
+  assert.deepEqual(killed, []);
+  assert.equal(spawned, 0);
+
+  // Valid newly launched PID kills ONLY that PID (never pre-existing PID 100)
+  fakeNow = 300000;
+  currentProcs = [
+    { pid: 100, uptimeSec: 300, args: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' },
+    { pid: 303, uptimeSec: 3, args: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' },
+  ];
+  await ctrl.check();
+  assert.deepEqual(killed, [303]);
+  assert.equal(spawned, 1);
+});
+
+test('uninstall reload guard: post-uninstall session sentinel blocks preload re-injection until active reinstall', () => {
+  const built = buildAll();
+  const code = fs.readFileSync(built.injectorPath, 'utf8');
+  const store = new Map([['__ag_zh_uninstalled__', '1']]);
+  const sessionStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+
+  // Reloading tab while __ag_zh_uninstalled__ === '1' must NOT re-initialize engine
+  const reloadSandbox = { window: {}, console, sessionStorage };
+  reloadSandbox.window = reloadSandbox;
+  vm.runInNewContext(code, reloadSandbox);
+  assert.equal(reloadSandbox.__AG_ZH__, undefined);
+
+  // Active reinstall clears the sentinel and mounts cleanly again
+  sessionStorage.removeItem('__ag_zh_uninstalled__');
+  const reinstallSandbox = { window: {}, console, sessionStorage };
+  reinstallSandbox.window = reinstallSandbox;
+  vm.runInNewContext(code, reinstallSandbox);
+  assert.ok(reinstallSandbox.__AG_ZH__);
 });

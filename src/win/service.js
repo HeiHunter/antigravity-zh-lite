@@ -180,8 +180,9 @@ export function installWinService({ rootDir, port, app }) {
 
 export async function uninstallWinService({ rootDir, port, purge = false }) {
   const paths = getWinServicePaths();
-  const restoredWindows = await destroyInjectedWindows(port);
+  // Stop background daemon FIRST so its poll loop cannot re-inject after destroyInjectedWindows()
   stopExistingWinDaemon();
+  const restoredWindows = await destroyInjectedWindows(port);
   if (fs.existsSync(paths.startupVbsPath)) {
     fs.rmSync(paths.startupVbsPath, { force: true });
   }

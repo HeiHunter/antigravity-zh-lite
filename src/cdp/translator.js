@@ -6,6 +6,7 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_CACHE = 2000;
 const MAX_BATCH_SIZE = 30;
 const MAX_GLOBAL_CONCURRENCY = 3;
+const MAX_GLOBAL_QUEUE = 60;
 
 const LLM_SYSTEM_PROMPT =
   'You translate short English UI prompts, command approval titles, and security risk descriptions in an AI coding IDE into concise, natural Simplified Chinese. Preserve all placeholder tokens like AGPH0X, AGPH1X, CLI commands, file paths, flags, and technical terms (e.g., macOS, LaunchAgent, CDP, JSON, DOM, localStorage, MutationObserver) exactly as-is. Return ONLY a JSON object mapping each exact input string to its Chinese translation.';
@@ -84,11 +85,14 @@ export function restoreSensitiveTokens(translated, tokens) {
   return out.trim();
 }
 
-function createSemaphore(maxConcurrent) {
+export function createSemaphore(maxConcurrent, maxQueueSize = MAX_GLOBAL_QUEUE) {
   let active = 0;
   const waiters = [];
   return async function withPermit(fn) {
     if (active >= maxConcurrent) {
+      if (waiters.length >= maxQueueSize) {
+        throw new Error('Dynamic translation queue full');
+      }
       await new Promise((resolve) => waiters.push(resolve));
     }
     active++;

@@ -44,39 +44,60 @@ export async function listCdpTargets(port, host = '127.0.0.1') {
 }
 
 /**
- * Cross-version Antigravity URL/title check:
- * - Allows Antigravity's local HTTPS UI server (https://127.0.0.1:<port>/... including cold-start #t=...)
- * - Allows Electron app:// and vscode-webview:// origins
- * - Allows file:// ONLY when path or title references Antigravity (blocks arbitrary local HTML files)
- * - Blocks generic plain http://localhost:* dev previews unless title explicitly contains "Antigravity"
+ * Cross-version Antigravity URL check (parsed strictly via URL, never prefix-spoofable):
+ * - Allows Electron/VS Code internal schemes: app://, vscode-webview://
+ * - Allows file:// ONLY when the URL path itself points into an Antigravity app bundle/dir (never title-only)
+ * - Allows Antigravity 2.0's local HTTPS UI server: https://127.0.0.1:<port>/... (including cold-start #t=...)
+ * - Blocks https://localhost:* and http://localhost:* user dev servers even if their title mentions Antigravity
+ * - Cross-version HTTP fallback: http://127.0.0.1:<port> ONLY when URL structure AND title both match Antigravity
  * - Always blocks devtools://, chrome-extension://, data:, about:blank, and external sites
  */
 export function isAntigravityUrl(rawUrl, rawTitle = '') {
-  const url = String(rawUrl || '');
+  const url = String(rawUrl || '').trim();
   const title = String(rawTitle || '');
   if (!url || url === 'about:blank') return false;
-  if (
-    url.startsWith('devtools://') ||
-    url.startsWith('chrome-extension://') ||
-    url.startsWith('data:')
-  ) {
+
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
     return false;
   }
 
-  if (url.startsWith('app://') || url.startsWith('vscode-webview://')) {
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol === 'devtools:' || protocol === 'chrome-extension:' || protocol === 'data:') {
+    return false;
+  }
+
+  if (protocol === 'app:' || protocol === 'vscode-webview:') {
     return true;
   }
 
-  if (url.startsWith('file://')) {
-    return /antigravity/i.test(url) || /antigravity/i.test(title);
+  if (protocol === 'file:') {
+    let decodedPath = parsed.pathname;
+    try {
+      decodedPath = decodeURIComponent(parsed.pathname);
+    } catch {
+      // keep raw pathname
+    }
+    return /(?:^|\/)antigravity(?:\s*\d*)?(?:\.app)?(?:\/|$)/i.test(decodedPath);
   }
 
-  if (url.startsWith('https://127.0.0.1') || url.startsWith('https://localhost')) {
-    return true;
+  if (protocol === 'https:') {
+    return parsed.hostname === '127.0.0.1' && Boolean(parsed.port);
   }
 
-  if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
-    return /antigravity/i.test(title);
+  if (protocol === 'http:') {
+    const isAntigravityPath =
+      parsed.pathname === '/' ||
+      parsed.pathname.startsWith('/c/') ||
+      parsed.hash.startsWith('#t=');
+    return (
+      parsed.hostname === '127.0.0.1' &&
+      Boolean(parsed.port) &&
+      isAntigravityPath &&
+      /\bantigravity\b/i.test(title)
+    );
   }
 
   return false;

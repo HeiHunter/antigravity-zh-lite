@@ -37,6 +37,9 @@ export function parseWinRegProxy(enableOut, serverOut) {
 }
 
 export function detectSystemProxy(explicitProxy = '') {
+  if (explicitProxy === false || explicitProxy === 'none' || explicitProxy === 'direct') {
+    return null;
+  }
   if (explicitProxy && typeof explicitProxy === 'string' && explicitProxy.trim()) {
     return explicitProxy.trim();
   }
@@ -109,6 +112,7 @@ export function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, tim
     const cleanupResources = () => {
       if (httpsReq) {
         try {
+          if (httpsReq.socket && !httpsReq.socket.destroyed) httpsReq.socket.destroy();
           httpsReq.destroy();
         } catch {
           // ignore

@@ -18,11 +18,153 @@ import { buildAll } from '../../scripts/build.js';
 const execFileAsync = promisify(execFile);
 const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 const BRIDGE_BINDING_NAME = '__AG_ZH_BRIDGE__';
+const UNINSTALLED_SESSION_KEY = '__ag_zh_uninstalled__';
 const MAX_BRIDGE_PAYLOAD_BYTES = 256 * 1024;
 const AUTO_FOLLOW_MAX_UPTIME_SEC = 15;
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const LOG_KEEP_BYTES = 256 * 1024;
 const MAC_MAIN_BIN_RE = /\/Contents\/MacOS\/Antigravity(?:\s|$)/;
+
+/**
+ * Validate whether an incoming CDP Runtime.bindingCalled event originates from
+ * the top-level default execution context of a verified Antigravity UI page.
+ */
+export function isAllowedBridgeCall(session, params) {
+  if (!session || !params) return false;
+  if (params.name !== BRIDGE_BINDING_NAME || typeof params.payload !== 'string') return false;
+  if (Buffer.byteLength(params.payload, 'utf8') > MAX_BRIDGE_PAYLOAD_BYTES) return false;
+  if (
+    session.mainContextId !== null &&
+    typeof params.executionContextId === 'number' &&
+    params.executionContextId !== session.mainContextId
+  ) {
+    return false;
+  }
+  return isAntigravityUrl(session.url, session.title);
+}
+
+/**
+ * Update tracked session state on Page.frameNavigated (top-level frame only)
+ * and return true only if the new URL is still a valid Antigravity UI page.
+ */
+export function applyMainFrameNavigation(session, params) {
+  if (!session || !params?.frame || params.frame.parentId) return false;
+  if (params.frame.id) session.mainFrameId = params.frame.id;
+  if (params.frame.url) {
+    session.url = String(params.frame.url);
+    session.title = session.url;
+  }
+  return isAntigravityUrl(session.url, session.title);
+}
+
+/**
+ * Refresh both the preload script (for future page reloads) and live dict on hot-reload.
+ */
+export async function refreshSessionOnHotReload(session, injectorSource, dictJson) {
+  if (!session || !session.client || !session.client.isOpen()) return false;
+  if (session.newDocScriptId) {
+    await session.client
+      .send('Page.removeScriptToEvaluateOnNewDocument', {
+        identifier: session.newDocScriptId,
+      })
+      .catch(() => {});
+  }
+  const nextReg = await session.client
+    .send('Page.addScriptToEvaluateOnNewDocument', {
+      source: injectorSource,
+    })
+    .catch(() => null);
+  session.newDocScriptId = nextReg?.identifier || null;
+  await evaluateOnClient(
+    session.client,
+    `window.__AG_ZH__ && window.__AG_ZH__.updateDict(${dictJson})`
+  );
+  return true;
+}
+
+/**
+ * Target-PID auto-follow controller with:
+ * - null vs [] distinction (process query failure never wipes ignoredPreExistingPids)
+ * - uptime <= 15s filter for newly launched instances
+ * - grace-period re-verification before quitting ONLY the matched candidate PID
+ */
+export function createAutoFollowController({
+  getProcs,
+  isCdpOpen,
+  quitByPid,
+  spawnApp,
+  sleep = SLEEP,
+  now = () => Date.now(),
+  initialPids = [],
+  maxUptimeSec = AUTO_FOLLOW_MAX_UPTIME_SEC,
+  cooldownMs = 20000,
+  graceMs = 1200,
+  log = (msg) => console.log(msg),
+  warn = (msg) => console.warn(msg),
+}) {
+  const ignoredPreExistingPids = new Set(initialPids);
+  const handledAutoRelaunchPids = new Set();
+  let lastAutoRelaunchAt = 0;
+  let isAutoRelaunching = false;
+
+  return {
+    ignoredPreExistingPids,
+    async check() {
+      if (isAutoRelaunching) return false;
+      if (now() - lastAutoRelaunchAt < cooldownMs) return false;
+
+      const procs = await getProcs();
+      if (procs === null) return false;
+
+      const activePids = new Set(procs.map((p) => p.pid));
+      for (const oldPid of [...ignoredPreExistingPids]) {
+        if (!activePids.has(oldPid)) ignoredPreExistingPids.delete(oldPid);
+      }
+
+      const candidate = procs.find(
+        (p) =>
+          !ignoredPreExistingPids.has(p.pid) &&
+          !handledAutoRelaunchPids.has(p.pid) &&
+          !String(p.args || '').includes('--remote-debugging-port') &&
+          (p.uptimeSec === null || p.uptimeSec <= maxUptimeSec)
+      );
+      if (!candidate) return procs.length > 0;
+
+      handledAutoRelaunchPids.add(candidate.pid);
+      isAutoRelaunching = true;
+      lastAutoRelaunchAt = now();
+      try {
+        log(
+          `[ag-zh] 检测到新启动的 Antigravity (PID ${candidate.pid}) 未开启调试端口，正在平滑重启接管...`
+        );
+        await sleep(graceMs);
+
+        if (await isCdpOpen()) return true;
+
+        const latestProcs = await getProcs();
+        const stillCandidate =
+          Array.isArray(latestProcs) &&
+          latestProcs.find(
+            (p) =>
+              p.pid === candidate.pid &&
+              !String(p.args || '').includes('--remote-debugging-port')
+          );
+        if (!stillCandidate) return true;
+
+        const exited = await quitByPid(candidate.pid);
+        if (exited) {
+          spawnApp();
+        }
+        return true;
+      } catch (err) {
+        warn(`[ag-zh] 自动跟随接管失败: ${err.message}`);
+        return true;
+      } finally {
+        isAutoRelaunching = false;
+      }
+    },
+  };
+}
 
 /**
  * Parse POSIX ps etime ("MM:SS", "HH:MM:SS", or "D-HH:MM:SS") to integer seconds.
@@ -357,6 +499,8 @@ async function evaluateInTargetOnce(target, expression) {
 
 /**
  * Best-effort teardown of injected UI & observer in currently open Antigravity windows (used on uninstall).
+ * Sets a per-tab sessionStorage sentinel so even if a pre-registered preload script lingers until restart,
+ * refreshing the window will NOT re-localize it.
  */
 export async function destroyInjectedWindows(port = DEFAULT_CDP_PORT) {
   let destroyed = 0;
@@ -364,12 +508,12 @@ export async function destroyInjectedWindows(port = DEFAULT_CDP_PORT) {
     const ver = await fetchCdpVersion(port);
     if (!isChromiumCdpVersion(ver)) return 0;
     const targets = (await listCdpTargets(port)).filter(isAntigravityUiTarget);
+    const expr =
+      `(function(){try{if(typeof sessionStorage!=="undefined"){sessionStorage.setItem(${JSON.stringify(UNINSTALLED_SESSION_KEY)},"1");}}catch(e){}` +
+      `if(window.__AG_ZH__&&typeof window.__AG_ZH__.destroy==="function"){window.__AG_ZH__.destroy();delete window.__AG_ZH__;return true;}return false;})()`;
     for (const target of targets) {
       try {
-        await evaluateInTargetOnce(
-          target,
-          'window.__AG_ZH__ && typeof window.__AG_ZH__.destroy === "function" && (window.__AG_ZH__.destroy(), delete window.__AG_ZH__, true)'
-        );
+        await evaluateInTargetOnce(target, expr);
         destroyed++;
       } catch {
         // ignore unreachable target
@@ -427,14 +571,29 @@ export async function runLauncher(options) {
 
   // Record pre-existing Antigravity PIDs at daemon start so we never kill an active session on service boot
   const initialProcs = (await getAntigravityMainProcessesAsync()) || [];
-  const ignoredPreExistingPids = new Set(initialProcs.map((p) => p.pid));
-  const handledAutoRelaunchPids = new Set();
-  let lastAutoRelaunchAt = 0;
-  let isAutoRelaunching = false;
+  const autoFollowController = createAutoFollowController({
+    getProcs: getAntigravityMainProcessesAsync,
+    isCdpOpen: async () => {
+      try {
+        await fetchCdpVersion(port);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    quitByPid: quitProcessByPid,
+    spawnApp: () => spawnAppWithDebugPort(app, port),
+    initialPids: initialProcs.map((p) => p.pid),
+  });
 
   async function injectNow(client, label = '') {
     if (!client.isOpen()) return false;
     await client.send('Runtime.addBinding', { name: BRIDGE_BINDING_NAME }).catch(() => {});
+    // Clear any prior post-uninstall sentinel when actively re-injecting from a running daemon
+    await evaluateOnClient(
+      client,
+      `try{if(typeof sessionStorage!=="undefined"){sessionStorage.removeItem(${JSON.stringify(UNINSTALLED_SESSION_KEY)});}}catch(e){}`
+    ).catch(() => {});
     const res = await client.send('Runtime.evaluate', {
       expression: injectorSource,
       awaitPromise: false,
@@ -515,16 +674,7 @@ export async function runLauncher(options) {
       });
 
       client.on('Runtime.bindingCalled', async (params) => {
-        if (params.name !== BRIDGE_BINDING_NAME || typeof params.payload !== 'string') return;
-        if (Buffer.byteLength(params.payload, 'utf8') > MAX_BRIDGE_PAYLOAD_BYTES) return;
-        if (
-          session.mainContextId !== null &&
-          typeof params.executionContextId === 'number' &&
-          params.executionContextId !== session.mainContextId
-        ) {
-          return;
-        }
-        if (!isAntigravityUrl(session.url, session.title)) return;
+        if (!isAllowedBridgeCall(session, params)) return;
 
         let msg;
         try {
@@ -592,15 +742,8 @@ export async function runLauncher(options) {
       client.on('Page.loadEventFired', scheduleEnsure);
       client.on('Page.domContentEventFired', scheduleEnsure);
       client.on('Page.frameNavigated', (params) => {
-        if (!params?.frame?.parentId) {
-          if (params?.frame?.id) session.mainFrameId = params.frame.id;
-          if (params?.frame?.url) {
-            session.url = String(params.frame.url);
-            session.title = session.url;
-          }
-          if (isAntigravityUrl(session.url, session.title)) {
-            scheduleEnsure();
-          }
+        if (applyMainFrameNavigation(session, params)) {
+          scheduleEnsure();
         }
       });
 
@@ -629,69 +772,10 @@ export async function runLauncher(options) {
   }
 
   async function maybeAutoFollowNewApp() {
-    if (
-      !daemon ||
-      !autoFollow ||
-      (process.platform !== 'darwin' && process.platform !== 'win32') ||
-      isAutoRelaunching
-    ) {
+    if (!daemon || !autoFollow || (process.platform !== 'darwin' && process.platform !== 'win32')) {
       return false;
     }
-    if (Date.now() - lastAutoRelaunchAt < 20000) return false;
-
-    const procs = await getAntigravityMainProcessesAsync();
-    // Critical safety: if process query failed (null), DO NOT modify ignoredPreExistingPids
-    if (procs === null) return false;
-
-    const activePids = new Set(procs.map((p) => p.pid));
-    for (const oldPid of [...ignoredPreExistingPids]) {
-      if (!activePids.has(oldPid)) ignoredPreExistingPids.delete(oldPid);
-    }
-
-    const candidate = procs.find(
-      (p) =>
-        !ignoredPreExistingPids.has(p.pid) &&
-        !handledAutoRelaunchPids.has(p.pid) &&
-        !p.args.includes('--remote-debugging-port') &&
-        (p.uptimeSec === null || p.uptimeSec <= AUTO_FOLLOW_MAX_UPTIME_SEC)
-    );
-    if (!candidate) return procs.length > 0;
-
-    handledAutoRelaunchPids.add(candidate.pid);
-    isAutoRelaunching = true;
-    lastAutoRelaunchAt = Date.now();
-    try {
-      console.log(
-        `[ag-zh] 检测到新启动的 Antigravity (PID ${candidate.pid}) 未开启调试端口，正在平滑重启接管...`
-      );
-      await SLEEP(1200);
-
-      // Re-verify right before quitting: CDP still closed & candidate PID still matches
-      try {
-        await fetchCdpVersion(port);
-        return true;
-      } catch {
-        // still closed, proceed
-      }
-      const latestProcs = await getAntigravityMainProcessesAsync();
-      const stillCandidate =
-        Array.isArray(latestProcs) &&
-        latestProcs.find(
-          (p) => p.pid === candidate.pid && !p.args.includes('--remote-debugging-port')
-        );
-      if (!stillCandidate) return true;
-
-      const exited = await quitProcessByPid(candidate.pid);
-      if (exited) {
-        spawnAppWithDebugPort(app, port);
-      }
-      return true;
-    } catch (err) {
-      console.warn(`[ag-zh] 自动跟随接管失败: ${err.message}`);
-      return true;
-    } finally {
-      isAutoRelaunching = false;
-    }
+    return await autoFollowController.check();
   }
 
   async function scanAndInject() {
@@ -760,25 +844,8 @@ export async function runLauncher(options) {
           const dictJson = fs.readFileSync(next.dictPath, 'utf8');
           let updated = 0;
           for (const session of sessions.values()) {
-            if (!session.client.isOpen()) continue;
-            if (session.newDocScriptId) {
-              await session.client
-                .send('Page.removeScriptToEvaluateOnNewDocument', {
-                  identifier: session.newDocScriptId,
-                })
-                .catch(() => {});
-            }
-            const nextReg = await session.client
-              .send('Page.addScriptToEvaluateOnNewDocument', {
-                source: injectorSource,
-              })
-              .catch(() => null);
-            session.newDocScriptId = nextReg?.identifier || null;
-            await evaluateOnClient(
-              session.client,
-              `window.__AG_ZH__ && window.__AG_ZH__.updateDict(${dictJson})`
-            );
-            updated++;
+            const ok = await refreshSessionOnHotReload(session, injectorSource, dictJson);
+            if (ok) updated++;
           }
           console.log(
             `[ag-zh] 检测到词库变更 (${filename})，已热更新 ${updated} 个窗口 (${next.stats.exactCount} 词条)`
@@ -808,16 +875,38 @@ export async function runLauncher(options) {
   };
   scheduleNextPoll(2000);
 
-  const cleanup = () => {
+  let cleaningUp = false;
+  const cleanup = async () => {
+    if (cleaningUp) return;
+    cleaningUp = true;
     stopped = true;
     if (pollTimer) clearTimeout(pollTimer);
     if (watcher) watcher.close();
-    for (const session of sessions.values()) {
-      session.client.close();
+
+    // Best-effort revoke registered preload scripts so reloading open tabs won't re-inject after daemon exits
+    const forceExitTimer = setTimeout(() => process.exit(0), 1200);
+    try {
+      await Promise.all(
+        [...sessions.values()].map(async (session) => {
+          if (session.client.isOpen() && session.newDocScriptId) {
+            await session.client
+              .send(
+                'Page.removeScriptToEvaluateOnNewDocument',
+                { identifier: session.newDocScriptId },
+                800
+              )
+              .catch(() => {});
+            session.newDocScriptId = null;
+          }
+          session.client.close();
+        })
+      );
+    } finally {
+      clearTimeout(forceExitTimer);
+      sessions.clear();
+      console.log('\n[ag-zh] 已退出守护进程（已撤销预注入脚本）。');
+      process.exit(0);
     }
-    sessions.clear();
-    console.log('\n[ag-zh] 已退出守护进程（客户端中已注入的界面不受影响）。');
-    process.exit(0);
   };
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);

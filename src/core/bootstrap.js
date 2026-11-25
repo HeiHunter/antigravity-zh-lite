@@ -61,11 +61,22 @@ function triggerFallbackDownload(jsonStr) {
 }
 
 const ENGINE_VERSION = '1.0.0';
+const UNINSTALLED_SESSION_KEY = '__ag_zh_uninstalled__';
 
 export function bootAntigravityZh(globalObj, initialDict) {
   // Top-frame guard: never mount inside embedded child iframes (e.g. MCP Apps / HTML previews / plugin boards)
   if (globalObj && globalObj.self && globalObj.top && globalObj.self !== globalObj.top) {
     return null;
+  }
+
+  // Post-uninstall reload guard: if uninstall tore down this tab, prevent any leftover preload script from re-mounting on reload
+  try {
+    const store = globalObj && globalObj.sessionStorage;
+    if (store && typeof store.getItem === 'function' && store.getItem(UNINSTALLED_SESSION_KEY) === '1') {
+      return null;
+    }
+  } catch {
+    // ignore storage restriction
   }
 
   // Idempotent re-injection for same engine version; clean hot-upgrade if engine version changed

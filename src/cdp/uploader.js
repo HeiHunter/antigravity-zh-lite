@@ -4,6 +4,21 @@ import { smartFetch } from './proxy.js';
 
 export const DEFAULT_CDP_PORT = 19229;
 const UPLOAD_TIMEOUT_MS = 10000;
+const REMOTE_SENSITIVE_KEY_RE =
+  /`[^`]+`|~\/[^\s]+|\/(?:Users|home|Applications|Library|etc|var|tmp|opt|usr)\/[^\s]+|[A-Za-z]:\\[^\s]+|https?:\/\/\S+|[\w.-]+@[\w.-]+\.[a-z]{2,}|\b(?:ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})\b/i;
+
+export function filterRemoteSafeEntries(exact) {
+  const safe = {};
+  let filteredCount = 0;
+  for (const [k, v] of Object.entries(exact || {})) {
+    if (REMOTE_SENSITIVE_KEY_RE.test(k)) {
+      filteredCount++;
+      continue;
+    }
+    safe[k] = v;
+  }
+  return { safe, filteredCount };
+}
 
 /**
  * Load user configuration from ag-zh.config.json.
@@ -135,12 +150,20 @@ export async function handleCollectedUpload({ rootDir, payload, meta = {}, confi
     return result;
   }
 
+  // Filter out newly collected keys containing embedded local paths, emails, URLs, or secret tokens before remote upload
+  const { safe: remoteExact } = filterRemoteSafeEntries(exact);
+  const remoteCount = Object.keys(remoteExact).length;
+  if (remoteCount === 0) {
+    result.remoteStatus = 'skipped-sensitive';
+    return result;
+  }
+
   const uploadBody = {
     source: 'antigravity-zh-lite',
     collectedAt: new Date().toISOString(),
-    pageUrl: meta.url || '',
-    incomingCount,
-    exact,
+    pageUrl: '',
+    incomingCount: remoteCount,
+    exact: remoteExact,
   };
 
   try {
@@ -174,9 +197,9 @@ export async function handleCollectedUpload({ rootDir, payload, meta = {}, confi
             'User-Agent': 'antigravity-zh-lite',
           },
           body: JSON.stringify({
-            title: `[词条采集] 新增 ${incomingCount} 条未翻译 UI 文案 (${new Date().toISOString().slice(0, 10)})`,
+            title: `[词条采集] 新增 ${remoteCount} 条未翻译 UI 文案 (${new Date().toISOString().slice(0, 10)})`,
             labels: ['i18n', 'collected'],
-            body: `自动上传自 \`antigravity-zh-lite\`（共 ${incomingCount} 条）：\n\n\`\`\`json\n${JSON.stringify({ exact }, null, 2)}\n\`\`\``,
+            body: `自动上传自 \`antigravity-zh-lite\`（共 ${remoteCount} 条）：\n\n\`\`\`json\n${JSON.stringify({ exact: remoteExact }, null, 2)}\n\`\`\``,
           }),
         },
         { timeoutMs: UPLOAD_TIMEOUT_MS, proxy }
@@ -197,11 +220,11 @@ export async function handleCollectedUpload({ rootDir, payload, meta = {}, confi
             'User-Agent': 'antigravity-zh-lite',
           },
           body: JSON.stringify({
-            description: `antigravity-zh-lite collected UI strings (${incomingCount})`,
+            description: `antigravity-zh-lite collected UI strings (${remoteCount})`,
             public: false,
             files: {
               '_collected.json': {
-                content: JSON.stringify({ exact }, null, 2) + '\n',
+                content: JSON.stringify({ exact: remoteExact }, null, 2) + '\n',
               },
             },
           }),

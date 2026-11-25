@@ -245,8 +245,10 @@ export function installMacService({ rootDir, port, app }) {
 
 export async function uninstallMacService({ rootDir, port, purge = false }) {
   const paths = getServicePaths();
-  const restoredWindows = await destroyInjectedWindows(port);
+  // Stop LaunchAgent daemon FIRST so its poll loop cannot re-inject after destroyInjectedWindows()
   bootoutLaunchAgent(paths.plistPath);
+  await new Promise((r) => setTimeout(r, 350));
+  const restoredWindows = await destroyInjectedWindows(port);
   if (fs.existsSync(paths.plistPath)) {
     fs.rmSync(paths.plistPath, { force: true });
   }
