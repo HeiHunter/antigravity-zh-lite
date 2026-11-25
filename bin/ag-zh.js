@@ -7,7 +7,7 @@ const nodeMajor = Number(process.versions.node.split('.')[0]);
 if (!Number.isFinite(nodeMajor) || nodeMajor < 22) {
   console.error(
     `\n[ag-zh] 需要 Node.js >= 22.0.0（当前版本为 v${process.versions.node}）。\n` +
-      '本插件基于 Node 原生 WebSocket 实现零依赖运行，请先升级 Node.js：\n' +
+      '本插件基于 Node 原生 WebSocket 实现零第三方依赖运行，请先升级 Node.js：\n' +
       '  • 官网下载：https://nodejs.org/\n' +
       '  • macOS Homebrew：brew install node\n' +
       '  • Windows winget：winget install OpenJS.NodeJS.LTS\n'
@@ -37,23 +37,24 @@ const ROOT = path.resolve(__dirname, '..');
 
 function printHelp() {
   console.log(`
-antigravity-zh-lite — Antigravity 2.0 轻量化无侵入汉化插件 (macOS / Windows)
+antigravity-zh-lite — Antigravity 2.0 轻量化运行时汉化插件 (macOS / Windows)
 
 用法:
   node bin/ag-zh.js [子命令] [选项]
 
 子命令（开机常驻推荐，支持 macOS 与 Windows）:
   install           一键安装开机常驻守护并生成「Antigravity 中文版」快捷启动器
-  uninstall         干净卸载常驻守护服务与快捷启动器
+  uninstall         卸载常驻守护与快捷启动器并恢复已开窗口（加 --purge 一并清理配置/缓存/日志）
   status            查看常驻服务、Antigravity 调试端口、动态翻译与上传配置状态
 
 运行选项:
   --daemon          后台静默常驻模式（跟随 Antigravity 自动打开并自动汉化）
-  --port <端口>     指定 CDP 调试端口（默认: 9229，也可在 ag-zh.config.json 配置）
+  --port <端口>     指定 CDP 调试端口（默认: 19229，也可在 ag-zh.config.json 配置）
   --app <路径/名称> 指定 Antigravity 安装路径（macOS .app / Windows .exe）
   --restart         若 Antigravity 已在运行且无调试端口，自动优雅退出并重启
   --attach-only     仅挂载到已开启调试端口的客户端，不尝试拉起应用
   --no-auto-follow  禁用「检测到新打开官方 Antigravity 时自动平滑接管」
+  --purge           配合 uninstall 使用，一并删除本地配置、翻译缓存、采集记录与日志
   --once            仅注入一次后退出（默认保持轻量守护，自动挂载新窗口与热更新词库）
   --no-watch        禁用 dicts/*.json 文件变动热更新
   --collect         开启已挂载窗口的「未翻译词条采集模式」
@@ -134,7 +135,8 @@ async function main() {
       console.log(`  • 配置文件     : ${res.configPath}`);
       console.log('\n使用提示：');
       console.log('  1. 下次直接打开 Antigravity（或把「Antigravity 中文版.app」拖到 Dock），会自动汉化并常驻；');
-      console.log('  2. 运行 node bin/ag-zh.js status 可随时查看运行状态。\n');
+      console.log('  2. 运行 node bin/ag-zh.js status 可随时查看运行状态；');
+      console.log('  3. 动态长句翻译默认开启（发送至 Google 翻译前会对路径/URL/命令占位符脱敏并本地缓存）；如需纯离线静态汉化，请在 ag-zh.config.json 将 dynamicTranslate.enabled 设为 false。\n');
       return;
     }
     if (process.platform === 'win32') {
@@ -151,7 +153,8 @@ async function main() {
       console.log(`  • 配置文件     : ${res.configPath}`);
       console.log('\n使用提示：');
       console.log('  1. 下次直接打开 Antigravity（或双击桌面「Antigravity 中文版」图标），会自动汉化并常驻；');
-      console.log('  2. 运行 node bin/ag-zh.js status 可随时查看运行状态。\n');
+      console.log('  2. 运行 node bin/ag-zh.js status 可随时查看运行状态；');
+      console.log('  3. 动态长句翻译默认开启（发送至 Google 翻译前会对路径/URL/命令占位符脱敏并本地缓存）；如需纯离线静态汉化，请在 ag-zh.config.json 将 dynamicTranslate.enabled 设为 false。\n');
       return;
     }
     throw new Error('install 常驻服务当前支持 macOS 与 Windows，Linux 请使用 --daemon 配合 systemd 运行。');
