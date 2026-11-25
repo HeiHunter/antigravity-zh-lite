@@ -277,7 +277,9 @@ test('macos service: generates valid LaunchAgent plist and native .app launcher 
     const launcher = fs.readFileSync(path.join(appPath, 'Contents', 'MacOS', 'launcher'), 'utf8');
     assert.ok(info.includes('Antigravity 中文版'));
     assert.ok(launcher.includes('--remote-debugging-port='));
-    assert.equal((fs.statSync(path.join(appPath, 'Contents', 'MacOS', 'launcher')).mode & 0o111) !== 0, true);
+    if (process.platform !== 'win32') {
+      assert.equal((fs.statSync(path.join(appPath, 'Contents', 'MacOS', 'launcher')).mode & 0o111) !== 0, true);
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
