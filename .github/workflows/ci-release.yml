@@ -36,6 +36,9 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Verify clean release packaging
+        run: npm run pack:release
+
   release:
     name: Build & Publish Release
     needs: test
