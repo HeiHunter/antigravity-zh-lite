@@ -34,6 +34,7 @@ import {
   createAutoFollowController,
   isAllowedBridgeCall,
   parseMacEtimeToSeconds,
+  parseMacPsOutput,
   refreshSessionOnHotReload,
 } from '../src/cdp/launcher.js';
 import { createMacLauncherApp, generateLaunchAgentPlist } from '../src/macos/service.js';
@@ -408,6 +409,17 @@ test('macos service: generates valid LaunchAgent plist and native .app launcher 
   assert.equal(parseMacEtimeToSeconds('01:02:03'), 3723);
   assert.equal(parseMacEtimeToSeconds('2-03:04:05'), 2 * 86400 + 3 * 3600 + 4 * 60 + 5);
   assert.equal(parseMacEtimeToSeconds('invalid'), null);
+
+  // Regression: Antigravity Helper.app inside /Contents/Frameworks/ must NOT match as main process
+  const parsedMacProcs = parseMacPsOutput([
+    '35791 02:43:39 /Applications/Antigravity.app/Contents/MacOS/Antigravity --remote-debugging-port=9229',
+    '35829 02:43:34 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=main.mjs',
+    '35830 02:43:34 /Applications/Antigravity.app/Contents/MacOS/Antigravity --type=renderer',
+  ].join('\n'));
+  assert.deepEqual(
+    parsedMacProcs.map((p) => p.pid),
+    [35791]
+  );
 });
 
 test('build: generates valid zero-dependency injector IIFE and handles bridge upload flow in VM', () => {

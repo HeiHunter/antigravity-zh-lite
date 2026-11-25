@@ -141,13 +141,13 @@ if curl -sf "http://127.0.0.1:\${PORT}/json/version" >/dev/null 2>&1; then
 fi
 
 # If Antigravity main process is running without CDP, gracefully terminate by exact PID and relaunch
-MAIN_PIDS=$(ps -axo pid=,args= | awk '/\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
+MAIN_PIDS=$(ps -axo pid=,args= | awk '!/\/Contents\/Frameworks\// && !/\/Contents\/MacOS\/Antigravity Helper/ && /\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
 if [ -n "$MAIN_PIDS" ]; then
   for p in $MAIN_PIDS; do
     kill -TERM "$p" >/dev/null 2>&1 || true
   done
   for _ in $(seq 1 24); do
-    STILL=$(ps -axo pid=,args= | awk '/\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
+    STILL=$(ps -axo pid=,args= | awk '!/\/Contents\/Frameworks\// && !/\/Contents\/MacOS\/Antigravity Helper/ && /\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
     [ -z "$STILL" ] && break
     sleep 0.25
   done

@@ -231,7 +231,7 @@ export function detectWinAppPath(customApp) {
   return '';
 }
 
-function parseMacPsOutput(out) {
+export function parseMacPsOutput(out) {
   const results = [];
   for (const rawLine of String(out || '').split('\n')) {
     const line = rawLine.trim();
@@ -241,6 +241,8 @@ function parseMacPsOutput(out) {
     const pid = Number(m[1]);
     const uptimeSec = parseMacEtimeToSeconds(m[2]);
     const args = m[3];
+    if (args.includes('/Contents/Frameworks/')) continue;
+    if (/\/Contents\/MacOS\/Antigravity Helper(?:\s|$)/.test(args)) continue;
     if (!MAC_MAIN_BIN_RE.test(args)) continue;
     if (args.includes('--type=')) continue;
     results.push({ pid, uptimeSec, args });

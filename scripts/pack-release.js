@@ -89,25 +89,56 @@ export function packRelease({ rootDir = ROOT, outDir = path.join(ROOT, 'release'
     }
 
     fs.mkdirSync(outDir, { recursive: true });
-    const tarPath = path.join(outDir, `${bundleName}.tar.gz`);
-    const zipPath = path.join(outDir, `${bundleName}.zip`);
+    const tarName = `${bundleName}.tar.gz`;
+    const zipName = `${bundleName}.zip`;
+    const tarPath = path.join(outDir, tarName);
+    const zipPath = path.join(outDir, zipName);
 
-    execFileSync('tar', ['-czf', tarPath, '-C', stageParent, bundleName], { stdio: 'pipe' });
+    let hasTar = false;
+    try {
+      const stagedTar = path.join(stageParent, tarName);
+      execFileSync('tar', ['-czf', tarName, bundleName], { cwd: stageParent, stdio: 'pipe' });
+      fs.copyFileSync(stagedTar, tarPath);
+      hasTar = true;
+    } catch {
+      hasTar = false;
+    }
 
     let hasZip = false;
     try {
       if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
-      execFileSync('zip', ['-rq', zipPath, bundleName], { cwd: stageParent, stdio: 'pipe' });
+      if (process.platform === 'win32') {
+        const psSrc = stageDir.replace(/'/g, "''");
+        const psDst = zipPath.replace(/'/g, "''");
+        execFileSync(
+          'powershell',
+          ['-NoProfile', '-Command', `Compress-Archive -Path '${psSrc}' -DestinationPath '${psDst}' -Force`],
+          { stdio: 'pipe', windowsHide: true }
+        );
+      } else {
+        execFileSync('zip', ['-rq', zipPath, bundleName], { cwd: stageParent, stdio: 'pipe' });
+      }
       hasZip = true;
     } catch {
       hasZip = false;
     }
 
+    if (!hasTar && !hasZip) {
+      throw new Error('Failed to create both .tar.gz and .zip release archives');
+    }
+
     const files = collectReleaseFiles(rootDir);
-    const tarKB = (fs.statSync(tarPath).size / 1024).toFixed(1);
+    const tarKB = hasTar ? (fs.statSync(tarPath).size / 1024).toFixed(1) : null;
     const zipKB = hasZip ? (fs.statSync(zipPath).size / 1024).toFixed(1) : null;
 
-    return { bundleName, files, tarPath, tarKB, zipPath: hasZip ? zipPath : null, zipKB };
+    return {
+      bundleName,
+      files,
+      tarPath: hasTar ? tarPath : null,
+      tarKB,
+      zipPath: hasZip ? zipPath : null,
+      zipKB,
+    };
   } finally {
     fs.rmSync(stageParent, { recursive: true, force: true });
   }
@@ -116,7 +147,9 @@ export function packRelease({ rootDir = ROOT, outDir = path.join(ROOT, 'release'
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const res = packRelease();
   console.log(`\n✅ 发布包构建完成（共 ${res.files.length} 个干净文件，已自动排除所有本地缓存与隐私文件）：`);
-  console.log(`  • tar.gz : ${res.tarPath} (${res.tarKB} KB)`);
+  if (res.tarPath) {
+    console.log(`  • tar.gz : ${res.tarPath} (${res.tarKB} KB)`);
+  }
   if (res.zipPath) {
     console.log(`  • zip    : ${res.zipPath} (${res.zipKB} KB)`);
   }
