@@ -5,7 +5,17 @@ const MAX_PENDING_KEYS = 200;
 const DEFAULT_RETRY_COOLDOWN_MS = 60000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 
-const DYNAMIC_CJK_RE = /[\u4e00-\u9fff]/;
+const DYNAMIC_CJK_GLOBAL_RE = /[\u4e00-\u9fff]/g;
+const DYNAMIC_ASCII_LETTER_GLOBAL_RE = /[A-Za-z]/g;
+
+function isMostlyChinese(text) {
+  const cjk = text.match(DYNAMIC_CJK_GLOBAL_RE);
+  if (!cjk || cjk.length === 0) return false;
+  const ascii = text.match(DYNAMIC_ASCII_LETTER_GLOBAL_RE);
+  const asciiCount = ascii ? ascii.length : 0;
+  // Allow English sentences that merely quote a Chinese filename/folder (e.g. "Antigravity 中文版.app")
+  return cjk.length * 4 >= asciiCount;
+}
 const DYNAMIC_WORDS_RE = /\b[A-Za-z]{2,}\b/g;
 const DYNAMIC_NOISE_START_RE = /^(?:https?:\/\/|file:\/\/|\/\/|\/\*|\/[\w.-]|~\/|[$#>{\[]|--)/i;
 const DYNAMIC_FILENAME_RE =
@@ -126,7 +136,7 @@ export function createDynamicQueue({
     if (!enabled || typeof rawText !== 'string') return false;
     const t = rawText.trim();
     if (t.length < 14 || t.length > DYNAMIC_MAX_LEN) return false;
-    if (DYNAMIC_CJK_RE.test(t)) return false;
+    if (isMostlyChinese(t)) return false;
     if (DYNAMIC_NOISE_START_RE.test(t)) return false;
     if (DYNAMIC_FILENAME_RE.test(t)) return false;
     if (DYNAMIC_CODE_RE.test(t)) return false;

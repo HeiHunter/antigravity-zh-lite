@@ -66,9 +66,13 @@ export function createDomTranslator(matcher, options = {}) {
     }
   }
 
-  function shouldSkipElement(el) {
+  function shouldSkipElement(el, { allowTextareaAttrs = false } = {}) {
     if (!el || el.nodeType !== 1) return false;
-    if (SKIP_TAGS.has(el.tagName)) return true;
+    if (el.tagName === 'TEXTAREA' && allowTextareaAttrs) {
+      // Allow translating placeholder/aria-label/title on <textarea> without ever walking its user text
+    } else if (SKIP_TAGS.has(el.tagName)) {
+      return true;
+    }
     if (el.isContentEditable) return true;
     if (ignoreSelectors && typeof el.closest === 'function') {
       try {
@@ -142,7 +146,7 @@ export function createDomTranslator(matcher, options = {}) {
   }
 
   function translateElementAttributes(el, collector) {
-    if (!el || el.nodeType !== 1 || shouldSkipElement(el)) return;
+    if (!el || el.nodeType !== 1 || shouldSkipElement(el, { allowTextareaAttrs: true })) return;
     if (typeof el.getAttribute !== 'function') return;
 
     let origMap = originalAttrMap.get(el);
@@ -190,6 +194,12 @@ export function createDomTranslator(matcher, options = {}) {
       return;
     }
     if (root.nodeType === 1) {
+      if (root.tagName === 'TEXTAREA') {
+        if (!shouldSkipElement(root, { allowTextareaAttrs: true })) {
+          visitor(root);
+        }
+        return;
+      }
       if (shouldSkipElement(root)) return;
       visitor(root);
       if (root.shadowRoot && root.id !== 'ag-zh-host') {

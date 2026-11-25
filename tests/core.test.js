@@ -165,6 +165,11 @@ test('walker: React-safe text & attribute translation, React re-render handling,
   const inputEl = createEl('input', {
     attrs: { placeholder: 'Ask anything...', 'aria-label': 'Send', value: 'Settings' },
   });
+  const textareaUserText = createText('Settings');
+  const textareaEl = createEl('textarea', {
+    attrs: { placeholder: 'Ask anything...', 'aria-label': 'Send' },
+    children: [textareaUserText],
+  });
 
   const root = createEl('div', {
     children: [
@@ -173,6 +178,7 @@ test('walker: React-safe text & attribute translation, React re-render handling,
       createEl('code', { children: [codeText] }),
       createEl('div', { classes: ['markdown-body'], children: [proseText] }),
       inputEl,
+      textareaEl,
     ],
   });
 
@@ -184,6 +190,9 @@ test('walker: React-safe text & attribute translation, React re-render handling,
   assert.equal(inputEl.getAttribute('placeholder'), '输入你的任务或问题...');
   assert.equal(inputEl.getAttribute('aria-label'), '发送');
   assert.equal(inputEl.getAttribute('value'), 'Settings');
+  assert.equal(textareaEl.getAttribute('placeholder'), '输入你的任务或问题...');
+  assert.equal(textareaEl.getAttribute('aria-label'), '发送');
+  assert.equal(textareaUserText.nodeValue, 'Settings');
 
   countText.nodeValue = '5 files changed';
   translator.translateTextNode(countText);
@@ -194,6 +203,9 @@ test('walker: React-safe text & attribute translation, React re-render handling,
   assert.equal(countText.nodeValue, '5 files changed');
   assert.equal(inputEl.getAttribute('placeholder'), 'Ask anything...');
   assert.equal(inputEl.getAttribute('aria-label'), 'Send');
+  assert.equal(textareaEl.getAttribute('placeholder'), 'Ask anything...');
+  assert.equal(textareaEl.getAttribute('aria-label'), 'Send');
+  assert.equal(textareaUserText.nodeValue, 'Settings');
 });
 
 test('collector: captures clean UI strings, notifies onChange, and filters noise', () => {
@@ -552,6 +564,21 @@ test('approval dialog: translates split React fragments statically and queues dy
       menuEl
     ),
     true
+  );
+  // English risk description quoting a Chinese filename is STILL eligible, while translated Chinese is NOT
+  assert.equal(
+    dynamicQueue.isEligible(
+      'Running this script creates ~/Applications/Antigravity 中文版.app outside the workspace.',
+      menuEl
+    ),
+    true
+  );
+  assert.equal(
+    dynamicQueue.isEligible(
+      '运行此脚本会在工作区外创建 ~/Applications/Antigravity 中文版.app 文件。',
+      menuEl
+    ),
+    false
   );
 
   // Marketplace shelf: long plugin description IS eligible, short plugin brand name is NOT

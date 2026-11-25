@@ -62,7 +62,7 @@
   },
   "scoped": [
     {
-      "selector": "button, [role=\"button\"], [role=\"radio\"], [role=\"option\"], [role=\"dialog\"], [role=\"alertdialog\"]",
+      "selector": "button, label, [role=\"button\"], [role=\"radio\"], [role=\"radiogroup\"], [role=\"option\"], [role=\"dialog\"], [role=\"alertdialog\"]",
       "exact": {
         "Yes": "是",
         "No": "否"
