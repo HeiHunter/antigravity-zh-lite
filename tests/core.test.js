@@ -8,7 +8,7 @@ import { createMatcher } from '../src/core/matcher.js';
 import { createDynamicQueue } from '../src/core/dynamic.js';
 import { createDomTranslator } from '../src/core/walker.js';
 import { createCollector } from '../src/core/collector.js';
-import { isAntigravityUiTarget } from '../src/cdp/client.js';
+import { isAntigravityUiTarget, isChromiumCdpVersion } from '../src/cdp/client.js';
 import { formatUploadModeLabel, handleCollectedUpload, loadConfig } from '../src/cdp/uploader.js';
 import {
   createDynamicTranslator,
@@ -197,20 +197,54 @@ test('collector: captures clean UI strings, notifies onChange, and filters noise
   assert.deepEqual(collector.exportDictTemplate(), { exact: { 'New Workflow': '' } });
 });
 
-test('cdp target filter: allows Antigravity UI targets and blocks external pages/devtools', () => {
+test('cdp target filter: allows Antigravity UI targets and blocks dev previews, external pages, and devtools', () => {
+  assert.equal(isChromiumCdpVersion({ Browser: 'Chrome/132.0.0.0' }), true);
+  assert.equal(isChromiumCdpVersion({ Browser: 'node.js/v22.12.0' }), false);
+
   assert.equal(
     isAntigravityUiTarget({
       type: 'page',
       url: 'file:///Applications/Antigravity.app/Contents/Resources/app/index.html',
-      webSocketDebuggerUrl: 'ws://127.0.0.1:9229/devtools/page/1',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/1',
     }),
     true
   );
+  // Arbitrary local HTML file must NOT be injected
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'file:///Users/alice/projects/demo/index.html',
+      title: 'My Demo',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/1b',
+    }),
+    false
+  );
+  // Antigravity 2.0 local HTTPS UI server (including cold-start token URL)
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'https://127.0.0.1:60912/#t=66e66d1a391a0c3bb34173a55da6bb23',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2',
+    }),
+    true
+  );
+  // Plain http://localhost dev server preview must NOT be injected
+  assert.equal(
+    isAntigravityUiTarget({
+      type: 'page',
+      url: 'http://localhost:3000/dashboard',
+      title: 'Vite App',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2b',
+    }),
+    false
+  );
+  // Cross-version fallback: plain http://localhost allowed ONLY when title explicitly names Antigravity
   assert.equal(
     isAntigravityUiTarget({
       type: 'page',
       url: 'http://localhost:3000/chat',
-      webSocketDebuggerUrl: 'ws://127.0.0.1:9229/devtools/page/2',
+      title: 'Workspace - Antigravity',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/2c',
     }),
     true
   );
@@ -218,7 +252,7 @@ test('cdp target filter: allows Antigravity UI targets and blocks external pages
     isAntigravityUiTarget({
       type: 'page',
       url: 'https://github.com/google/antigravity',
-      webSocketDebuggerUrl: 'ws://127.0.0.1:9229/devtools/page/3',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/3',
     }),
     false
   );
@@ -226,7 +260,7 @@ test('cdp target filter: allows Antigravity UI targets and blocks external pages
     isAntigravityUiTarget({
       type: 'page',
       url: 'devtools://devtools/bundled/inspector.html',
-      webSocketDebuggerUrl: 'ws://127.0.0.1:9229/devtools/page/4',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:19229/devtools/page/4',
     }),
     false
   );
@@ -351,6 +385,13 @@ test('build: generates valid zero-dependency injector IIFE and handles bridge up
   const emptyFinish = sandbox.__AG_ZH__.finishAndUploadCollection();
   assert.equal(emptyFinish.count, 0);
   assert.equal(bridgedMessages.length, 0);
+
+  // Top-frame guard: child iframe (self !== top) must NOT initialize window.__AG_ZH__
+  const iframeSandbox = { window: {}, console, top: { isParent: true } };
+  iframeSandbox.window = iframeSandbox;
+  iframeSandbox.self = iframeSandbox;
+  vm.runInNewContext(code, iframeSandbox);
+  assert.equal(iframeSandbox.__AG_ZH__, undefined);
 });
 
 test('approval dialog: translates split React fragments statically and queues dynamic risk text only inside card', async () => {

@@ -5,6 +5,29 @@
  * (such as Runtime.bindingCalled for CSP-safe page-to-daemon messaging).
  */
 
+export async function fetchCdpVersion(port, host = '127.0.0.1') {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch(`http://${host}:${port}/json/version`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function isChromiumCdpVersion(versionInfo) {
+  if (!versionInfo || typeof versionInfo !== 'object') return false;
+  const browser = String(versionInfo.Browser || '');
+  if (!browser) return false;
+  // Reject Node.js --inspect endpoints (e.g. "node.js/v22.x")
+  if (/^node\.js\//i.test(browser)) return false;
+  return /Chrome|Chromium|Electron|Antigravity/i.test(browser);
+}
+
 export async function listCdpTargets(port, host = '127.0.0.1') {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2000);
@@ -21,30 +44,52 @@ export async function listCdpTargets(port, host = '127.0.0.1') {
 }
 
 /**
+ * Cross-version Antigravity URL/title check:
+ * - Allows Antigravity's local HTTPS UI server (https://127.0.0.1:<port>/... including cold-start #t=...)
+ * - Allows Electron app:// and vscode-webview:// origins
+ * - Allows file:// ONLY when path or title references Antigravity (blocks arbitrary local HTML files)
+ * - Blocks generic plain http://localhost:* dev previews unless title explicitly contains "Antigravity"
+ * - Always blocks devtools://, chrome-extension://, data:, about:blank, and external sites
+ */
+export function isAntigravityUrl(rawUrl, rawTitle = '') {
+  const url = String(rawUrl || '');
+  const title = String(rawTitle || '');
+  if (!url || url === 'about:blank') return false;
+  if (
+    url.startsWith('devtools://') ||
+    url.startsWith('chrome-extension://') ||
+    url.startsWith('data:')
+  ) {
+    return false;
+  }
+
+  if (url.startsWith('app://') || url.startsWith('vscode-webview://')) {
+    return true;
+  }
+
+  if (url.startsWith('file://')) {
+    return /antigravity/i.test(url) || /antigravity/i.test(title);
+  }
+
+  if (url.startsWith('https://127.0.0.1') || url.startsWith('https://localhost')) {
+    return true;
+  }
+
+  if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
+    return /antigravity/i.test(title);
+  }
+
+  return false;
+}
+
+/**
  * Filter CDP targets so we ONLY inject into Antigravity UI pages/webviews,
- * never DevTools windows or external browsing tabs inside the built-in browser.
+ * never DevTools windows, user localhost dev servers, or external browsing tabs.
  */
 export function isAntigravityUiTarget(target) {
   if (!target || !target.webSocketDebuggerUrl) return false;
   if (target.type !== 'page' && target.type !== 'webview') return false;
-
-  const url = String(target.url || '');
-  if (!url || url === 'about:blank') return false;
-  if (url.startsWith('devtools://') || url.startsWith('chrome-extension://')) return false;
-
-  if (
-    url.startsWith('file://') ||
-    url.startsWith('app://') ||
-    url.startsWith('vscode-webview://') ||
-    url.startsWith('http://localhost') ||
-    url.startsWith('http://127.0.0.1') ||
-    url.startsWith('https://localhost') ||
-    url.startsWith('https://127.0.0.1')
-  ) {
-    return true;
-  }
-
-  return false;
+  return isAntigravityUrl(target.url, target.title);
 }
 
 export class CdpClient {

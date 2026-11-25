@@ -63,6 +63,11 @@ function triggerFallbackDownload(jsonStr) {
 const ENGINE_VERSION = '1.0.0';
 
 export function bootAntigravityZh(globalObj, initialDict) {
+  // Top-frame guard: never mount inside embedded child iframes (e.g. MCP Apps / HTML previews / plugin boards)
+  if (globalObj && globalObj.self && globalObj.top && globalObj.self !== globalObj.top) {
+    return null;
+  }
+
   // Idempotent re-injection for same engine version; clean hot-upgrade if engine version changed
   if (globalObj.__AG_ZH__ && typeof globalObj.__AG_ZH__.updateDict === 'function') {
     if (globalObj.__AG_ZH__.version === ENGINE_VERSION) {

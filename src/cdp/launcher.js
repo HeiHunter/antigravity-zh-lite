@@ -2,13 +2,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
-import { CdpClient, isAntigravityUiTarget, listCdpTargets } from './client.js';
-import { handleCollectedUpload, loadConfig } from './uploader.js';
+import {
+  CdpClient,
+  fetchCdpVersion,
+  isAntigravityUiTarget,
+  isAntigravityUrl,
+  isChromiumCdpVersion,
+  listCdpTargets,
+} from './client.js';
+import { DEFAULT_CDP_PORT, handleCollectedUpload, loadConfig } from './uploader.js';
 import { createDynamicTranslator } from './translator.js';
 import { buildAll } from '../../scripts/build.js';
 
 const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 const BRIDGE_BINDING_NAME = '__AG_ZH_BRIDGE__';
+const MAX_BRIDGE_PAYLOAD_BYTES = 256 * 1024;
 const MAC_MAIN_BIN_RE = /\/Contents\/MacOS\/Antigravity(?:\s|$)/;
 
 export function detectMacAppPath(customApp) {
@@ -248,7 +256,7 @@ async function evaluateInTargetOnce(target, expression) {
 export async function runLauncher(options) {
   const { rootDir } = options;
   const config = loadConfig(rootDir);
-  const port = options.port || config.port || 9229;
+  const port = options.port || config.port || DEFAULT_CDP_PORT;
   const app = options.app || config.app || '';
   const restart = Boolean(options.restart);
   const attachOnly = Boolean(options.attachOnly);
@@ -273,7 +281,7 @@ export async function runLauncher(options) {
     );
   }
 
-  /** @type {Map<string, { client: CdpClient, title: string, reinjecting: boolean }>} */
+  /** @type {Map<string, { client: CdpClient, title: string, url: string, reinjecting: boolean, mainFrameId: string|null, mainContextId: number|null, newDocScriptId: string|null }>} */
   const sessions = new Map();
   const connecting = new Set();
 
@@ -299,18 +307,12 @@ export async function runLauncher(options) {
       console.warn(`[ag-zh] 注入脚本异常 (${label}): ${desc}`);
       return false;
     }
-    const cached = dynamicTranslator.getCachedEntries();
-    if (Object.keys(cached).length > 0 && client.isOpen()) {
-      await evaluateOnClient(
-        client,
-        `window.__AG_ZH__ && window.__AG_ZH__.__onDynamicTranslations(${JSON.stringify(cached)})`
-      ).catch(() => {});
-    }
     return true;
   }
 
   async function ensureInjectedOnSession(session) {
     if (!session || session.reinjecting || !session.client.isOpen()) return;
+    if (!isAntigravityUrl(session.url, session.title)) return;
     session.reinjecting = true;
     try {
       const alive = await evaluateOnClient(
@@ -341,16 +343,56 @@ export async function runLauncher(options) {
       await client.send('Runtime.enable').catch(() => {});
       await client.send('Runtime.addBinding', { name: BRIDGE_BINDING_NAME }).catch(() => {});
 
-      const session = { client, title: label, reinjecting: false };
+      let mainFrameId = null;
+      try {
+        const tree = await client.send('Page.getFrameTree');
+        mainFrameId = tree?.frameTree?.frame?.id || null;
+      } catch {
+        mainFrameId = null;
+      }
+
+      const session = {
+        client,
+        title: label,
+        url: String(target.url || ''),
+        reinjecting: false,
+        mainFrameId,
+        mainContextId: null,
+        newDocScriptId: null,
+      };
+
+      client.on('Runtime.executionContextCreated', (params) => {
+        const ctx = params?.context;
+        if (!ctx || !ctx.auxData?.isDefault) return;
+        if (!session.mainFrameId || ctx.auxData.frameId === session.mainFrameId) {
+          session.mainContextId = ctx.id;
+        }
+      });
+
+      client.on('Runtime.executionContextsCleared', () => {
+        session.mainContextId = null;
+      });
 
       client.on('Runtime.bindingCalled', async (params) => {
-        if (params.name !== BRIDGE_BINDING_NAME || !params.payload) return;
+        if (params.name !== BRIDGE_BINDING_NAME || typeof params.payload !== 'string') return;
+        if (Buffer.byteLength(params.payload, 'utf8') > MAX_BRIDGE_PAYLOAD_BYTES) return;
+        // Scope bridge handling to the top-level default execution context & valid Antigravity origin
+        if (
+          session.mainContextId !== null &&
+          typeof params.executionContextId === 'number' &&
+          params.executionContextId !== session.mainContextId
+        ) {
+          return;
+        }
+        if (!isAntigravityUrl(session.url, session.title)) return;
+
         let msg;
         try {
           msg = JSON.parse(params.payload);
         } catch {
           return;
         }
+        if (!msg || typeof msg !== 'object') return;
         if (msg.type === 'translate_dynamic' && Array.isArray(msg.texts)) {
           try {
             const latestConfig = loadConfig(rootDir);
@@ -411,8 +453,14 @@ export async function runLauncher(options) {
       client.on('Page.domContentEventFired', scheduleEnsure);
       client.on('Page.frameNavigated', (params) => {
         if (!params?.frame?.parentId) {
-          if (params?.frame?.url) session.title = params.frame.url;
-          scheduleEnsure();
+          if (params?.frame?.id) session.mainFrameId = params.frame.id;
+          if (params?.frame?.url) {
+            session.url = String(params.frame.url);
+            session.title = session.url;
+          }
+          if (isAntigravityUrl(session.url, session.title)) {
+            scheduleEnsure();
+          }
         }
       });
 
@@ -420,9 +468,10 @@ export async function runLauncher(options) {
         sessions.delete(target.id);
       });
 
-      await client.send('Page.addScriptToEvaluateOnNewDocument', {
+      const addRes = await client.send('Page.addScriptToEvaluateOnNewDocument', {
         source: injectorSource,
       });
+      session.newDocScriptId = addRes?.identifier || null;
       await injectNow(client, label);
 
       if (once) {
@@ -486,6 +535,10 @@ export async function runLauncher(options) {
   async function scanAndInject() {
     let targets;
     try {
+      const ver = await fetchCdpVersion(port);
+      if (!isChromiumCdpVersion(ver)) {
+        return false;
+      }
       targets = await listCdpTargets(port);
     } catch {
       for (const [id, session] of sessions.entries()) {
@@ -511,6 +564,7 @@ export async function runLauncher(options) {
         await attachPersistentTarget(target);
       } else {
         if (target.title) existing.title = target.title;
+        if (target.url) existing.url = String(target.url);
         await ensureInjectedOnSession(existing);
       }
     }
@@ -545,6 +599,20 @@ export async function runLauncher(options) {
           let updated = 0;
           for (const session of sessions.values()) {
             if (!session.client.isOpen()) continue;
+            // Sync Page.addScriptToEvaluateOnNewDocument so reloads never revert to stale dicts
+            if (session.newDocScriptId) {
+              await session.client
+                .send('Page.removeScriptToEvaluateOnNewDocument', {
+                  identifier: session.newDocScriptId,
+                })
+                .catch(() => {});
+            }
+            const nextReg = await session.client
+              .send('Page.addScriptToEvaluateOnNewDocument', {
+                source: injectorSource,
+              })
+              .catch(() => null);
+            session.newDocScriptId = nextReg?.identifier || null;
             await evaluateOnClient(
               session.client,
               `window.__AG_ZH__ && window.__AG_ZH__.updateDict(${dictJson})`
@@ -579,7 +647,7 @@ export async function runLauncher(options) {
   process.on('SIGTERM', cleanup);
 }
 
-export async function dumpCollectedFromCdp({ port = 9229, outputPath }) {
+export async function dumpCollectedFromCdp({ port = DEFAULT_CDP_PORT, outputPath }) {
   const targets = (await listCdpTargets(port)).filter(isAntigravityUiTarget);
   if (targets.length === 0) {
     throw new Error(`端口 ${port} 上未找到 Antigravity 页面目标。`);
@@ -601,7 +669,7 @@ export async function dumpCollectedFromCdp({ port = 9229, outputPath }) {
   return { count, outputPath };
 }
 
-export async function toggleCollectorInCdp({ port = 9229, enabled = true }) {
+export async function toggleCollectorInCdp({ port = DEFAULT_CDP_PORT, enabled = true }) {
   const targets = (await listCdpTargets(port)).filter(isAntigravityUiTarget);
   for (const target of targets) {
     await evaluateInTargetOnce(

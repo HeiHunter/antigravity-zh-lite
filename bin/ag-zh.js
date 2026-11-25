@@ -20,7 +20,7 @@ import {
   runLauncher,
   toggleCollectorInCdp,
 } from '../src/cdp/launcher.js';
-import { loadConfig } from '../src/cdp/uploader.js';
+import { DEFAULT_CDP_PORT, loadConfig } from '../src/cdp/uploader.js';
 import {
   getMacServiceStatus,
   installMacService,
@@ -80,7 +80,7 @@ function parseArgs(argv) {
   const config = loadConfig(ROOT);
   const opts = {
     command,
-    port: config.port || 9229,
+    port: config.port || DEFAULT_CDP_PORT,
     app: config.app || '',
     restart: false,
     attachOnly: false,
