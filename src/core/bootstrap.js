@@ -60,7 +60,7 @@ function triggerFallbackDownload(jsonStr) {
   }
 }
 
-const ENGINE_VERSION = '1.0.0';
+const ENGINE_VERSION = '1.1.0';
 const UNINSTALLED_SESSION_KEY = '__ag_zh_uninstalled__';
 
 export function bootAntigravityZh(globalObj, initialDict) {

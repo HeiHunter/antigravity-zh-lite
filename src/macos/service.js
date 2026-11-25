@@ -117,7 +117,7 @@ export function createMacLauncherApp({ appBundlePath, antigravityAppPath, port }
   <key>CFBundleIdentifier</key>
   <string>com.antigravity.zh-lite.launcher</string>
   <key>CFBundleVersion</key>
-  <string>1.0.0</string>
+  <string>1.1.0</string>
   <key>CFBundleExecutable</key>
   <string>launcher</string>
   <key>CFBundlePackageType</key>

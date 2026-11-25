@@ -1,7 +1,7 @@
 {
   "name": "antigravity-zh-lite",
-  "version": "1.0.0",
-  "description": "Google Antigravity 2.0 桌面端轻量化、零依赖、无侵入简体中文汉化插件（支持 macOS & Windows，开机常驻 + 动态长句翻译）",
+  "version": "1.1.0",
+  "description": "Google Antigravity 2.0 桌面端轻量化、零第三方依赖、不修改安装包的简体中文汉化插件（支持 macOS & Windows，开机常驻 + 动态长句翻译）",
   "author": "HeiHunter",
   "license": "MIT",
   "type": "module",
