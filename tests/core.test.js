@@ -17,6 +17,7 @@ import {
   restoreSensitiveTokens,
 } from '../src/cdp/translator.js';
 import { parseMacScutilProxy, parseWinRegProxy, smartFetch } from '../src/cdp/proxy.js';
+import { parseMacEtimeToSeconds } from '../src/cdp/launcher.js';
 import { createMacLauncherApp, generateLaunchAgentPlist } from '../src/macos/service.js';
 import { generateWinDaemonVbs, generateWinShortcutScript } from '../src/win/service.js';
 import { collectReleaseFiles } from '../scripts/pack-release.js';
@@ -347,12 +348,20 @@ test('macos service: generates valid LaunchAgent plist and native .app launcher 
     const launcher = fs.readFileSync(path.join(appPath, 'Contents', 'MacOS', 'launcher'), 'utf8');
     assert.ok(info.includes('Antigravity 中文版'));
     assert.ok(launcher.includes('--remote-debugging-port='));
+    assert.ok(launcher.includes('/Contents/MacOS/Antigravity'));
+    assert.ok(!launcher.includes('pgrep -x'));
     if (process.platform !== 'win32') {
       assert.equal((fs.statSync(path.join(appPath, 'Contents', 'MacOS', 'launcher')).mode & 0o111) !== 0, true);
     }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+
+  assert.equal(parseMacEtimeToSeconds('00:08'), 8);
+  assert.equal(parseMacEtimeToSeconds('02:15'), 135);
+  assert.equal(parseMacEtimeToSeconds('01:02:03'), 3723);
+  assert.equal(parseMacEtimeToSeconds('2-03:04:05'), 2 * 86400 + 3 * 3600 + 4 * 60 + 5);
+  assert.equal(parseMacEtimeToSeconds('invalid'), null);
 });
 
 test('build: generates valid zero-dependency injector IIFE and handles bridge upload flow in VM', () => {

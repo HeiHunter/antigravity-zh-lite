@@ -88,6 +88,7 @@ function parseArgs(argv) {
     daemon: false,
     watch: config.watchDicts !== false,
     autoFollow: config.autoFollow !== false,
+    purge: false,
     collect: false,
     dump: false,
     help: false,
@@ -103,6 +104,7 @@ function parseArgs(argv) {
     else if (arg === '--no-watch') opts.watch = false;
     else if (arg === '--watch') opts.watch = true;
     else if (arg === '--no-auto-follow') opts.autoFollow = false;
+    else if (arg === '--purge') opts.purge = true;
     else if (arg === '--collect') opts.collect = true;
     else if (arg === '--dump') opts.dump = true;
     else if (arg === '--port' && rest[i + 1]) {
@@ -157,17 +159,35 @@ async function main() {
 
   if (opts.command === 'uninstall') {
     if (process.platform === 'darwin') {
-      const res = uninstallMacService({ rootDir: ROOT });
+      const res = await uninstallMacService({ rootDir: ROOT, port: opts.port, purge: opts.purge });
       console.log('\n✅ 已卸载 Antigravity 汉化常驻服务（macOS）：');
       console.log(`  • 已移除服务 : ${res.removedPlist}`);
-      console.log(`  • 已移除应用 : ${res.removedUserApp}\n`);
+      console.log(`  • 已移除应用 : ${res.removedUserApp}`);
+      if (res.restoredWindows > 0) {
+        console.log(`  • 已恢复窗口 : ${res.restoredWindows} 个已打开窗口已即时切回英文`);
+      }
+      if (res.purged.length > 0) {
+        console.log(`  • 已额外清理 : ${res.purged.join(', ')}`);
+      } else {
+        console.log('  • 提示：已保留本地配置、翻译缓存与日志（如需一并清理，请运行 uninstall --purge）；重启 Antigravity 后调试端口将关闭。');
+      }
+      console.log('');
       return;
     }
     if (process.platform === 'win32') {
-      const res = uninstallWinService({ rootDir: ROOT });
+      const res = await uninstallWinService({ rootDir: ROOT, port: opts.port, purge: opts.purge });
       console.log('\n✅ 已卸载 Antigravity 汉化常驻服务（Windows）：');
       console.log(`  • 已移除启动项 : ${res.removedStartup}`);
-      console.log(`  • 已移除快捷方式: ${res.removedDesktopShortcut}\n`);
+      console.log(`  • 已移除快捷方式: ${res.removedDesktopShortcut}`);
+      if (res.restoredWindows > 0) {
+        console.log(`  • 已恢复窗口   : ${res.restoredWindows} 个已打开窗口已即时切回英文`);
+      }
+      if (res.purged.length > 0) {
+        console.log(`  • 已额外清理   : ${res.purged.join(', ')}`);
+      } else {
+        console.log('  • 提示：已保留本地配置、翻译缓存与日志（如需一并清理，请运行 uninstall --purge）；重启 Antigravity 后调试端口将关闭。');
+      }
+      console.log('');
       return;
     }
     throw new Error('当前平台未安装系统常驻服务。');

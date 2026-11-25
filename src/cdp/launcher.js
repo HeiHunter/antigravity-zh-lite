@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   CdpClient,
   fetchCdpVersion,
@@ -14,10 +15,48 @@ import { DEFAULT_CDP_PORT, handleCollectedUpload, loadConfig } from './uploader.
 import { createDynamicTranslator } from './translator.js';
 import { buildAll } from '../../scripts/build.js';
 
+const execFileAsync = promisify(execFile);
 const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 const BRIDGE_BINDING_NAME = '__AG_ZH_BRIDGE__';
 const MAX_BRIDGE_PAYLOAD_BYTES = 256 * 1024;
+const AUTO_FOLLOW_MAX_UPTIME_SEC = 15;
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+const LOG_KEEP_BYTES = 256 * 1024;
 const MAC_MAIN_BIN_RE = /\/Contents\/MacOS\/Antigravity(?:\s|$)/;
+
+/**
+ * Parse POSIX ps etime ("MM:SS", "HH:MM:SS", or "D-HH:MM:SS") to integer seconds.
+ */
+export function parseMacEtimeToSeconds(etimeStr) {
+  if (typeof etimeStr !== 'string') return null;
+  const s = etimeStr.trim();
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s);
+  if (!m) return null;
+  const days = m[1] ? Number(m[1]) : 0;
+  const hours = m[2] ? Number(m[2]) : 0;
+  const mins = Number(m[3]);
+  const secs = Number(m[4]);
+  return days * 86400 + hours * 3600 + mins * 60 + secs;
+}
+
+export function truncateLogIfOversized(logPath) {
+  try {
+    if (!logPath || !fs.existsSync(logPath)) return false;
+    const stat = fs.statSync(logPath);
+    if (stat.size <= LOG_MAX_BYTES) return false;
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const buf = Buffer.alloc(LOG_KEEP_BYTES);
+      fs.readSync(fd, buf, 0, LOG_KEEP_BYTES, stat.size - LOG_KEEP_BYTES);
+      fs.writeFileSync(logPath, buf);
+      return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
 
 export function detectMacAppPath(customApp) {
   if (customApp) return customApp;
@@ -50,23 +89,52 @@ export function detectWinAppPath(customApp) {
   return '';
 }
 
+function parseMacPsOutput(out) {
+  const results = [];
+  for (const rawLine of String(out || '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = /^(\d+)\s+(\S+)\s+([\s\S]+)$/.exec(line);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const uptimeSec = parseMacEtimeToSeconds(m[2]);
+    const args = m[3];
+    if (!MAC_MAIN_BIN_RE.test(args)) continue;
+    if (args.includes('--type=')) continue;
+    results.push({ pid, uptimeSec, args });
+  }
+  return results;
+}
+
+function parseWinCimOutput(out) {
+  const trimmed = String(out || '').trim();
+  if (!trimmed) return [];
+  const parsed = JSON.parse(trimmed);
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  const results = [];
+  const now = Date.now();
+  for (const item of list) {
+    if (!item || !item.ProcessId) continue;
+    const args = String(item.CommandLine || '');
+    if (args.includes('--type=')) continue;
+    let uptimeSec = null;
+    if (typeof item.CreationDate === 'string') {
+      const msMatch = /\/Date\((\d+)\)\//.exec(item.CreationDate);
+      const ts = msMatch ? Number(msMatch[1]) : Date.parse(item.CreationDate);
+      if (Number.isFinite(ts)) {
+        uptimeSec = Math.max(0, Math.floor((now - ts) / 1000));
+      }
+    }
+    results.push({ pid: Number(item.ProcessId), uptimeSec, args });
+  }
+  return results;
+}
+
 export function getMacAntigravityMainProcesses() {
   if (process.platform !== 'darwin') return [];
   try {
-    const out = execFileSync('ps', ['-axo', 'pid=,args='], { encoding: 'utf8' });
-    const results = [];
-    for (const rawLine of out.split('\n')) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      const m = /^(\d+)\s+([\s\S]+)$/.exec(line);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      const args = m[2];
-      if (!MAC_MAIN_BIN_RE.test(args)) continue;
-      if (args.includes('--type=')) continue;
-      results.push({ pid, args });
-    }
-    return results;
+    const out = execFileSync('ps', ['-axo', 'pid=,etime=,args='], { encoding: 'utf8' });
+    return parseMacPsOutput(out);
   } catch {
     return [];
   }
@@ -75,24 +143,19 @@ export function getMacAntigravityMainProcesses() {
 export function getWinAntigravityMainProcesses() {
   if (process.platform !== 'win32') return [];
   try {
+    const quick = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Antigravity.exe', '/NH'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (!/Antigravity\.exe/i.test(quick)) return [];
     const psCmd =
       "Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe'\" | " +
-      'Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress';
+      'Select-Object ProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress';
     const out = execFileSync('powershell', ['-NoProfile', '-Command', psCmd], {
       encoding: 'utf8',
       windowsHide: true,
-    }).trim();
-    if (!out) return [];
-    const parsed = JSON.parse(out);
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    const results = [];
-    for (const item of list) {
-      if (!item || !item.ProcessId) continue;
-      const args = String(item.CommandLine || '');
-      if (args.includes('--type=')) continue;
-      results.push({ pid: Number(item.ProcessId), args });
-    }
-    return results;
+    });
+    return parseWinCimOutput(out);
   } catch {
     return [];
   }
@@ -104,50 +167,86 @@ export function getAntigravityMainProcesses() {
   return [];
 }
 
-function isAppRunning() {
-  return getAntigravityMainProcesses().length > 0;
+/**
+ * Async process discovery that returns `null` on query error (distinct from `[]` when no process is running)
+ * so transient failures never wipe ignoredPreExistingPids.
+ * On Windows, checks lightweight `tasklist` first so idle polling avoids spawning PowerShell.
+ */
+export async function getAntigravityMainProcessesAsync() {
+  try {
+    if (process.platform === 'darwin') {
+      const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,etime=,args='], {
+        encoding: 'utf8',
+        timeout: 3000,
+      });
+      return parseMacPsOutput(stdout);
+    }
+    if (process.platform === 'win32') {
+      const { stdout: quick } = await execFileAsync(
+        'tasklist',
+        ['/FI', 'IMAGENAME eq Antigravity.exe', '/NH'],
+        { encoding: 'utf8', timeout: 3000, windowsHide: true }
+      );
+      if (!/Antigravity\.exe/i.test(quick)) {
+        return [];
+      }
+      const psCmd =
+        "Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe'\" | " +
+        'Select-Object ProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress';
+      const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-Command', psCmd], {
+        encoding: 'utf8',
+        timeout: 5000,
+        windowsHide: true,
+      });
+      return parseWinCimOutput(stdout);
+    }
+    return [];
+  } catch {
+    return null;
+  }
 }
 
-async function quitAppGracefully(appName = 'Antigravity') {
-  if (process.platform === 'win32') {
-    const procs = getWinAntigravityMainProcesses();
-    for (const p of procs) {
-      try {
-        execFileSync('taskkill', ['/PID', String(p.pid)], { stdio: 'ignore', windowsHide: true });
-      } catch {
-        // ignore
-      }
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gracefully terminate ONE specific Antigravity PID (never blanket-kills other instances).
+ */
+async function quitProcessByPid(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    if (process.platform === 'win32') {
+      await execFileAsync('taskkill', ['/PID', String(pid)], {
+        timeout: 3000,
+        windowsHide: true,
+      }).catch(() => {});
+    } else {
+      process.kill(pid, 'SIGTERM');
     }
-    for (let i = 0; i < 24; i++) {
-      if (!isAppRunning()) return true;
-      await SLEEP(250);
-    }
-    return !isAppRunning();
+  } catch {
+    // process may already have exited
   }
 
-  // macOS: prefer POSIX SIGTERM to the user's own main process (zero TCC prompts)
-  const procs = getMacAntigravityMainProcesses();
+  for (let i = 0; i < 24; i++) {
+    if (!isPidAlive(pid)) return true;
+    await SLEEP(250);
+  }
+  return !isPidAlive(pid);
+}
+
+async function quitAllRunningInteractive() {
+  const procs = (await getAntigravityMainProcessesAsync()) || [];
   for (const p of procs) {
-    try {
-      process.kill(p.pid, 'SIGTERM');
-    } catch {
-      // ignore
-    }
+    await quitProcessByPid(p.pid);
   }
-  for (let i = 0; i < 20; i++) {
-    if (!isAppRunning()) return true;
-    await SLEEP(250);
-  }
-  try {
-    execFileSync('osascript', ['-e', `quit app "${appName}"`], { stdio: 'ignore' });
-  } catch {
-    // ignore
-  }
-  for (let i = 0; i < 20; i++) {
-    if (!isAppRunning()) return true;
-    await SLEEP(250);
-  }
-  return !isAppRunning();
+  const remain = (await getAntigravityMainProcessesAsync()) || [];
+  return remain.length === 0;
 }
 
 function spawnAppWithDebugPort(customApp, port) {
@@ -178,8 +277,11 @@ function spawnAppWithDebugPort(customApp, port) {
 
 export async function ensureCdpReady({ port, app, restart = false, attachOnly = false }) {
   try {
-    await listCdpTargets(port);
-    return { launched: false };
+    const ver = await fetchCdpVersion(port);
+    if (isChromiumCdpVersion(ver)) {
+      await listCdpTargets(port);
+      return { launched: false };
+    }
   } catch {
     // Port not open yet
   }
@@ -198,7 +300,7 @@ export async function ensureCdpReady({ port, app, restart = false, attachOnly = 
     );
   }
 
-  const running = isAppRunning();
+  const running = ((await getAntigravityMainProcessesAsync()) || []).length > 0;
   if (running) {
     if (!restart) {
       throw new Error(
@@ -209,7 +311,7 @@ export async function ensureCdpReady({ port, app, restart = false, attachOnly = 
       );
     }
     console.log('[ag-zh] 正在优雅关闭现有 Antigravity 实例...');
-    const exited = await quitAppGracefully();
+    const exited = await quitAllRunningInteractive();
     if (!exited) {
       throw new Error('等待 Antigravity 退出超时，请手动完全退出后重试。');
     }
@@ -253,6 +355,32 @@ async function evaluateInTargetOnce(target, expression) {
   }
 }
 
+/**
+ * Best-effort teardown of injected UI & observer in currently open Antigravity windows (used on uninstall).
+ */
+export async function destroyInjectedWindows(port = DEFAULT_CDP_PORT) {
+  let destroyed = 0;
+  try {
+    const ver = await fetchCdpVersion(port);
+    if (!isChromiumCdpVersion(ver)) return 0;
+    const targets = (await listCdpTargets(port)).filter(isAntigravityUiTarget);
+    for (const target of targets) {
+      try {
+        await evaluateInTargetOnce(
+          target,
+          'window.__AG_ZH__ && typeof window.__AG_ZH__.destroy === "function" && (window.__AG_ZH__.destroy(), delete window.__AG_ZH__, true)'
+        );
+        destroyed++;
+      } catch {
+        // ignore unreachable target
+      }
+    }
+  } catch {
+    // CDP not running
+  }
+  return destroyed;
+}
+
 export async function runLauncher(options) {
   const { rootDir } = options;
   const config = loadConfig(rootDir);
@@ -265,6 +393,18 @@ export async function runLauncher(options) {
   const watch = options.watch !== undefined ? options.watch : config.watchDicts !== false;
   const autoFollow =
     options.autoFollow !== undefined ? options.autoFollow : config.autoFollow !== false;
+
+  if (daemon) {
+    const defaultLogPath =
+      process.platform === 'win32'
+        ? path.join(
+            process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+            'antigravity-zh-lite',
+            'daemon.log'
+          )
+        : path.join(os.homedir(), 'Library', 'Logs', 'antigravity-zh-lite', 'daemon.log');
+    truncateLogIfOversized(defaultLogPath);
+  }
 
   const built = buildAll();
   let injectorSource = fs.readFileSync(built.injectorPath, 'utf8');
@@ -286,7 +426,8 @@ export async function runLauncher(options) {
   const connecting = new Set();
 
   // Record pre-existing Antigravity PIDs at daemon start so we never kill an active session on service boot
-  const ignoredPreExistingPids = new Set(getAntigravityMainProcesses().map((p) => p.pid));
+  const initialProcs = (await getAntigravityMainProcessesAsync()) || [];
+  const ignoredPreExistingPids = new Set(initialProcs.map((p) => p.pid));
   const handledAutoRelaunchPids = new Set();
   let lastAutoRelaunchAt = 0;
   let isAutoRelaunching = false;
@@ -376,7 +517,6 @@ export async function runLauncher(options) {
       client.on('Runtime.bindingCalled', async (params) => {
         if (params.name !== BRIDGE_BINDING_NAME || typeof params.payload !== 'string') return;
         if (Buffer.byteLength(params.payload, 'utf8') > MAX_BRIDGE_PAYLOAD_BYTES) return;
-        // Scope bridge handling to the top-level default execution context & valid Antigravity origin
         if (
           session.mainContextId !== null &&
           typeof params.executionContextId === 'number' &&
@@ -495,11 +635,14 @@ export async function runLauncher(options) {
       (process.platform !== 'darwin' && process.platform !== 'win32') ||
       isAutoRelaunching
     ) {
-      return;
+      return false;
     }
-    if (Date.now() - lastAutoRelaunchAt < 20000) return;
+    if (Date.now() - lastAutoRelaunchAt < 20000) return false;
 
-    const procs = getAntigravityMainProcesses();
+    const procs = await getAntigravityMainProcessesAsync();
+    // Critical safety: if process query failed (null), DO NOT modify ignoredPreExistingPids
+    if (procs === null) return false;
+
     const activePids = new Set(procs.map((p) => p.pid));
     for (const oldPid of [...ignoredPreExistingPids]) {
       if (!activePids.has(oldPid)) ignoredPreExistingPids.delete(oldPid);
@@ -509,9 +652,10 @@ export async function runLauncher(options) {
       (p) =>
         !ignoredPreExistingPids.has(p.pid) &&
         !handledAutoRelaunchPids.has(p.pid) &&
-        !p.args.includes('--remote-debugging-port')
+        !p.args.includes('--remote-debugging-port') &&
+        (p.uptimeSec === null || p.uptimeSec <= AUTO_FOLLOW_MAX_UPTIME_SEC)
     );
-    if (!candidate) return;
+    if (!candidate) return procs.length > 0;
 
     handledAutoRelaunchPids.add(candidate.pid);
     isAutoRelaunching = true;
@@ -521,12 +665,30 @@ export async function runLauncher(options) {
         `[ag-zh] 检测到新启动的 Antigravity (PID ${candidate.pid}) 未开启调试端口，正在平滑重启接管...`
       );
       await SLEEP(1200);
-      const exited = await quitAppGracefully();
+
+      // Re-verify right before quitting: CDP still closed & candidate PID still matches
+      try {
+        await fetchCdpVersion(port);
+        return true;
+      } catch {
+        // still closed, proceed
+      }
+      const latestProcs = await getAntigravityMainProcessesAsync();
+      const stillCandidate =
+        Array.isArray(latestProcs) &&
+        latestProcs.find(
+          (p) => p.pid === candidate.pid && !p.args.includes('--remote-debugging-port')
+        );
+      if (!stillCandidate) return true;
+
+      const exited = await quitProcessByPid(candidate.pid);
       if (exited) {
         spawnAppWithDebugPort(app, port);
       }
+      return true;
     } catch (err) {
       console.warn(`[ag-zh] 自动跟随接管失败: ${err.message}`);
+      return true;
     } finally {
       isAutoRelaunching = false;
     }
@@ -537,7 +699,7 @@ export async function runLauncher(options) {
     try {
       const ver = await fetchCdpVersion(port);
       if (!isChromiumCdpVersion(ver)) {
-        return false;
+        return { cdpActive: false, appSeen: false };
       }
       targets = await listCdpTargets(port);
     } catch {
@@ -545,8 +707,8 @@ export async function runLauncher(options) {
         session.client.close();
         sessions.delete(id);
       }
-      await maybeAutoFollowNewApp();
-      return false;
+      const appSeen = await maybeAutoFollowNewApp();
+      return { cdpActive: false, appSeen };
     }
 
     const uiTargets = targets.filter(isAntigravityUiTarget);
@@ -568,7 +730,7 @@ export async function runLauncher(options) {
         await ensureInjectedOnSession(existing);
       }
     }
-    return true;
+    return { cdpActive: true, appSeen: true };
   }
 
   await scanAndInject();
@@ -599,7 +761,6 @@ export async function runLauncher(options) {
           let updated = 0;
           for (const session of sessions.values()) {
             if (!session.client.isOpen()) continue;
-            // Sync Page.addScriptToEvaluateOnNewDocument so reloads never revert to stale dicts
             if (session.newDocScriptId) {
               await session.client
                 .send('Page.removeScriptToEvaluateOnNewDocument', {
@@ -629,12 +790,27 @@ export async function runLauncher(options) {
     });
   }
 
-  const pollTimer = setInterval(async () => {
-    await scanAndInject();
-  }, 2000);
+  // Serialized setTimeout poll loop (guarantees zero overlapping scans) with gentle idle backoff
+  let stopped = false;
+  let pollTimer = null;
+  const scheduleNextPoll = (delayMs) => {
+    if (stopped) return;
+    pollTimer = setTimeout(async () => {
+      let nextDelay = 2000;
+      try {
+        const res = await scanAndInject();
+        nextDelay = res.cdpActive || res.appSeen ? 2000 : 4000;
+      } catch {
+        nextDelay = 4000;
+      }
+      scheduleNextPoll(nextDelay);
+    }, delayMs);
+  };
+  scheduleNextPoll(2000);
 
   const cleanup = () => {
-    clearInterval(pollTimer);
+    stopped = true;
+    if (pollTimer) clearTimeout(pollTimer);
     if (watcher) watcher.close();
     for (const session of sessions.values()) {
       session.client.close();

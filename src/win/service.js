@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
-import { detectWinAppPath, getAntigravityMainProcesses } from '../cdp/launcher.js';
+import {
+  destroyInjectedWindows,
+  detectWinAppPath,
+  getAntigravityMainProcesses,
+} from '../cdp/launcher.js';
 import { isAntigravityUiTarget, listCdpTargets } from '../cdp/client.js';
 import { formatUploadModeLabel, loadConfig } from '../cdp/uploader.js';
 
@@ -174,8 +178,9 @@ export function installWinService({ rootDir, port, app }) {
   };
 }
 
-export function uninstallWinService({ rootDir }) {
+export async function uninstallWinService({ rootDir, port, purge = false }) {
   const paths = getWinServicePaths();
+  const restoredWindows = await destroyInjectedWindows(port);
   stopExistingWinDaemon();
   if (fs.existsSync(paths.startupVbsPath)) {
     fs.rmSync(paths.startupVbsPath, { force: true });
@@ -187,10 +192,29 @@ export function uninstallWinService({ rootDir }) {
   if (fs.existsSync(projectShortcutPath)) {
     fs.rmSync(projectShortcutPath, { force: true });
   }
+
+  const purged = [];
+  if (purge) {
+    const extras = [
+      paths.logDir,
+      path.join(rootDir, 'ag-zh.config.json'),
+      path.join(rootDir, 'dicts', '_dynamic_cache.json'),
+      path.join(rootDir, 'dicts', '_collected.json'),
+    ];
+    for (const target of extras) {
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { recursive: true, force: true });
+        purged.push(target);
+      }
+    }
+  }
+
   return {
     removedStartup: paths.startupVbsPath,
     removedDesktopShortcut: paths.desktopShortcutPath,
     removedProjectShortcut: projectShortcutPath,
+    restoredWindows,
+    purged,
   };
 }
 

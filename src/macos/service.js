@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { detectMacAppPath, getMacAntigravityMainProcesses } from '../cdp/launcher.js';
+import {
+  destroyInjectedWindows,
+  detectMacAppPath,
+  getMacAntigravityMainProcesses,
+} from '../cdp/launcher.js';
 import { isAntigravityUiTarget, listCdpTargets } from '../cdp/client.js';
 import { formatUploadModeLabel, loadConfig } from '../cdp/uploader.js';
 
@@ -113,7 +117,7 @@ export function createMacLauncherApp({ appBundlePath, antigravityAppPath, port }
   <key>CFBundleIdentifier</key>
   <string>com.antigravity.zh-lite.launcher</string>
   <key>CFBundleVersion</key>
-  <string>0.2.0</string>
+  <string>1.0.0</string>
   <key>CFBundleExecutable</key>
   <string>launcher</string>
   <key>CFBundlePackageType</key>
@@ -136,12 +140,16 @@ if curl -sf "http://127.0.0.1:\${PORT}/json/version" >/dev/null 2>&1; then
   exit 0
 fi
 
-# If Antigravity is running without CDP, gracefully quit and relaunch with CDP
-if pgrep -x "Antigravity" >/dev/null 2>&1; then
-  osascript -e 'quit app "Antigravity"' >/dev/null 2>&1 || true
-  for _ in $(seq 1 20); do
-    pgrep -x "Antigravity" >/dev/null 2>&1 || break
-    sleep 0.2
+# If Antigravity main process is running without CDP, gracefully terminate by exact PID and relaunch
+MAIN_PIDS=$(ps -axo pid=,args= | awk '/\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
+if [ -n "$MAIN_PIDS" ]; then
+  for p in $MAIN_PIDS; do
+    kill -TERM "$p" >/dev/null 2>&1 || true
+  done
+  for _ in $(seq 1 24); do
+    STILL=$(ps -axo pid=,args= | awk '/\/Contents\/MacOS\/Antigravity([[:space:]]|$)/ && !/--type=/ {print $1}')
+    [ -z "$STILL" ] && break
+    sleep 0.25
   done
 fi
 
@@ -235,8 +243,9 @@ export function installMacService({ rootDir, port, app }) {
   };
 }
 
-export function uninstallMacService({ rootDir }) {
+export async function uninstallMacService({ rootDir, port, purge = false }) {
   const paths = getServicePaths();
+  const restoredWindows = await destroyInjectedWindows(port);
   bootoutLaunchAgent(paths.plistPath);
   if (fs.existsSync(paths.plistPath)) {
     fs.rmSync(paths.plistPath, { force: true });
@@ -248,10 +257,29 @@ export function uninstallMacService({ rootDir }) {
   if (fs.existsSync(projectAppPath)) {
     fs.rmSync(projectAppPath, { recursive: true, force: true });
   }
+
+  const purged = [];
+  if (purge) {
+    const extras = [
+      paths.logDir,
+      path.join(rootDir, 'ag-zh.config.json'),
+      path.join(rootDir, 'dicts', '_dynamic_cache.json'),
+      path.join(rootDir, 'dicts', '_collected.json'),
+    ];
+    for (const target of extras) {
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { recursive: true, force: true });
+        purged.push(target);
+      }
+    }
+  }
+
   return {
     removedPlist: paths.plistPath,
     removedUserApp: paths.userAppPath,
     removedProjectApp: projectAppPath,
+    restoredWindows,
+    purged,
   };
 }
 
