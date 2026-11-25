@@ -10,7 +10,12 @@ import { createDomTranslator } from '../src/core/walker.js';
 import { createCollector } from '../src/core/collector.js';
 import { isAntigravityUiTarget } from '../src/cdp/client.js';
 import { formatUploadModeLabel, handleCollectedUpload, loadConfig } from '../src/cdp/uploader.js';
-import { createDynamicTranslator } from '../src/cdp/translator.js';
+import {
+  createDynamicTranslator,
+  isValidDynamicKey,
+  redactSensitiveTokens,
+  restoreSensitiveTokens,
+} from '../src/cdp/translator.js';
 import { parseMacScutilProxy, parseWinRegProxy, smartFetch } from '../src/cdp/proxy.js';
 import { createMacLauncherApp, generateLaunchAgentPlist } from '../src/macos/service.js';
 import { generateWinDaemonVbs, generateWinShortcutScript } from '../src/win/service.js';
@@ -41,6 +46,9 @@ function createEl(
     },
     setAttribute(name, val) {
       attrMap.set(name, String(val));
+    },
+    removeAttribute(name) {
+      attrMap.delete(name);
     },
     matches(selector) {
       return selector
@@ -512,9 +520,68 @@ test('daemon dynamic translator: caches translations to disk and reuses cache wi
     const r3 = await t2.translateTexts([sample]);
     assert.equal(r3.fromCache, 1);
     assert.equal(r3.translations[sample], `译:${sample}`);
+
+    // Regression: negative maxCacheSize must NOT hang flushCacheSync()
+    t2.flushCacheSync(-1);
+    assert.equal(t2.getCacheSize(), 1);
+    t2.flushCacheSync(0);
+    assert.equal(t2.getCacheSize(), 0);
+
+    // Regression: translateTexts() enforces isValidDynamicKey() on backend (rejects model names / short labels)
+    const rejected = await t1.translateTexts(['Gemini 4 Neon', 'Short label']);
+    assert.deepEqual(rejected.translations, {});
+    assert.equal(isValidDynamicKey('Gemini 4 Neon'), false);
+
+    // Regression: placeholder redaction & strict restoration
+    const rawRisk =
+      "The command runs `node bin/ag-zh.js` and writes files in ~/Library/LaunchAgents using 'install'.";
+    const { redacted, tokens } = redactSensitiveTokens(rawRisk);
+    assert.ok(!redacted.includes('~/Library/LaunchAgents'));
+    assert.ok(!redacted.includes('`node bin/ag-zh.js`'));
+    assert.ok(tokens.length >= 2);
+    assert.equal(restoreSensitiveTokens(redacted, tokens), rawRisk);
+    // Corrupted placeholder must fail safely and return null instead of rendering broken tokens
+    assert.equal(restoreSensitiveTokens('翻译后的文本漏掉了占位符', tokens), null);
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test('dynamicQueue: retries after cooldown on failure and prunes disconnected nodes', async () => {
+  const batches = [];
+  const dq = createDynamicQueue({
+    sendRequest(batch) {
+      batches.push(batch);
+    },
+    retryCooldownMs: 30,
+    maxAttempts: 2,
+  });
+
+  const sentence = 'The command modifies files outside the current workspace directory.';
+  const el = createEl('div', { attrs: { role: 'dialog' } });
+  const n1 = createText(sentence, el);
+  dq.enqueue(sentence, n1, el);
+  await new Promise((r) => setTimeout(r, 130));
+  assert.equal(batches.length, 1);
+
+  // Wait past cooldown, simulate retry with a fresh connected node while n1 disconnected
+  n1.isConnected = false;
+  await new Promise((r) => setTimeout(r, 40));
+  const n2 = createText(sentence, el);
+  dq.enqueue(sentence, n2, el);
+  await new Promise((r) => setTimeout(r, 130));
+  assert.equal(batches.length, 2);
+
+  // Max attempts reached -> no 3rd retry until resolved
+  await new Promise((r) => setTimeout(r, 40));
+  dq.enqueue(sentence, n2, el);
+  await new Promise((r) => setTimeout(r, 130));
+  assert.equal(batches.length, 2);
+
+  // Disconnected node pruning drops empty entries cleanly
+  n2.isConnected = false;
+  dq.pruneStalePending();
+  assert.equal(dq.getPendingSize(), 0);
 });
 
 test('proxy parser: extracts macOS scutil and Windows registry HTTP proxies', () => {

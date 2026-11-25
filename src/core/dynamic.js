@@ -1,6 +1,10 @@
 const DYNAMIC_MIN_LEN_SENTENCE = 28;
 const DYNAMIC_MIN_WORDS_SENTENCE = 5;
 const DYNAMIC_MAX_LEN = 480;
+const MAX_PENDING_KEYS = 200;
+const DEFAULT_RETRY_COOLDOWN_MS = 60000;
+const DEFAULT_MAX_ATTEMPTS = 2;
+
 const DYNAMIC_CJK_RE = /[\u4e00-\u9fff]/;
 const DYNAMIC_WORDS_RE = /\b[A-Za-z]{2,}\b/g;
 const DYNAMIC_NOISE_START_RE = /^(?:https?:\/\/|file:\/\/|\/\/|\/\*|\/[\w.-]|~\/|[$#>{\[]|--)/i;
@@ -46,16 +50,27 @@ function isNonChatRoute() {
   return p.length > 1 && !/^\/c(?:\/|$)/.test(p);
 }
 
+function wrapNodeRef(node) {
+  return typeof WeakRef === 'function' ? new WeakRef(node) : { deref: () => node };
+}
+
 /**
- * Browser-side dynamic translation queue with STRICT long-sentence-only guards:
- * - Short labels, model names (Gemini/Claude/GPT), font names, and buttons NEVER use machine translation.
- * - Only missing long English sentences (>= 5 words and >= 28 chars) inside UI overlays/dialogs/approval cards,
- *   plus explicit approval titles ("Allow ...?"), are sent to the daemon translator.
+ * Browser-side dynamic translation queue with:
+ * - Strict long-sentence-only guards (>= 5 words and >= 28 chars, plus "Allow ...?")
+ * - Bounded retry with cooldown so transient network failures recover cleanly
+ * - WeakRef-backed node storage + detached node pruning to avoid SPA DOM memory leaks
  */
-export function createDynamicQueue({ sendRequest, onApplyNodes }) {
+export function createDynamicQueue({
+  sendRequest,
+  onApplyNodes,
+  retryCooldownMs = DEFAULT_RETRY_COOLDOWN_MS,
+  maxAttempts = DEFAULT_MAX_ATTEMPTS,
+}) {
   const approvalCards = new WeakSet();
+  /** @type {Map<string, Set<{ deref: () => any }>>} */
   const pendingByText = new Map();
-  const requestedTexts = new Set();
+  /** @type {Map<string, { attempts: number, lastAt: number }>} */
+  const requestHistory = new Map();
   const queuedTexts = new Set();
   let flushTimer = null;
   let enabled = true;
@@ -121,23 +136,18 @@ export function createDynamicQueue({ sendRequest, onApplyNodes }) {
     const words = t.match(DYNAMIC_WORDS_RE);
     if (!words || words.length < 3) return false;
 
-    // Never machine-translate model/brand names (e.g. "Gemini 4 Neon High", "Claude Sonnet 5.5")
     if (DYNAMIC_MODEL_OR_BRAND_RE.test(t) && spaceTokens.length < 6) {
       return false;
     }
 
-    // Exception 1: Explicit command approval question header ("Allow ...?")
     if (APPROVAL_TITLE_RE.test(t) && spaceTokens.length >= 3) {
       return true;
     }
 
-    // Strict long-sentence gate: must be >= 28 chars AND >= 5 words
     if (t.length < DYNAMIC_MIN_LEN_SENTENCE || spaceTokens.length < DYNAMIC_MIN_WORDS_SENTENCE) {
       return false;
     }
 
-    // Must be a known system/risk prompt sentence, inside a UI dialog/overlay/marketplace/approval card,
-    // or on a dedicated non-chat app route (e.g. /plugins, /marketplace, /settings, /customizations)
     if (DYNAMIC_PROMPT_TEXT_RE.test(t)) return true;
     if (element && isInsideApprovalCard(element)) return true;
     if (element && isInsideUiOverlay(element)) return true;
@@ -146,21 +156,53 @@ export function createDynamicQueue({ sendRequest, onApplyNodes }) {
     return false;
   }
 
+  function pruneStalePending() {
+    for (const [key, refSet] of pendingByText.entries()) {
+      for (const ref of [...refSet]) {
+        const node = ref.deref();
+        if (!node || node.isConnected === false) {
+          refSet.delete(ref);
+        }
+      }
+      if (refSet.size === 0) {
+        pendingByText.delete(key);
+      }
+    }
+    while (pendingByText.size > MAX_PENDING_KEYS) {
+      const oldestKey = pendingByText.keys().next().value;
+      if (oldestKey === undefined) break;
+      pendingByText.delete(oldestKey);
+    }
+  }
+
+  function canRequestNow(key, now = Date.now()) {
+    const rec = requestHistory.get(key);
+    if (!rec) return true;
+    if (rec.attempts >= maxAttempts) return false;
+    return now - rec.lastAt >= retryCooldownMs;
+  }
+
   function flush() {
     flushTimer = null;
     if (!enabled || queuedTexts.size === 0) {
       queuedTexts.clear();
       return;
     }
+    pruneStalePending();
+    const now = Date.now();
     const batch = [...queuedTexts].slice(0, 20);
     for (const t of batch) {
       queuedTexts.delete(t);
-      requestedTexts.add(t);
+      const prev = requestHistory.get(t);
+      requestHistory.set(t, {
+        attempts: (prev ? prev.attempts : 0) + 1,
+        lastAt: now,
+      });
     }
     if (queuedTexts.size > 0) {
       flushTimer = setTimeout(flush, 150);
     }
-    if (sendRequest) {
+    if (sendRequest && batch.length > 0) {
       sendRequest(batch);
     }
   }
@@ -169,14 +211,30 @@ export function createDynamicQueue({ sendRequest, onApplyNodes }) {
     if (!isEligible(rawText, element)) return false;
     const key = rawText.trim();
 
-    let nodeSet = pendingByText.get(key);
-    if (!nodeSet) {
-      nodeSet = new Set();
-      pendingByText.set(key, nodeSet);
+    if (pendingByText.size >= MAX_PENDING_KEYS && !pendingByText.has(key)) {
+      pruneStalePending();
     }
-    if (node) nodeSet.add(node);
 
-    if (!requestedTexts.has(key)) {
+    let refSet = pendingByText.get(key);
+    if (!refSet) {
+      refSet = new Set();
+      pendingByText.set(key, refSet);
+    }
+    if (node) {
+      // Avoid duplicating identical live node references
+      let exists = false;
+      for (const ref of refSet) {
+        const n = ref.deref();
+        if (!n || n.isConnected === false) {
+          refSet.delete(ref);
+        } else if (n === node) {
+          exists = true;
+        }
+      }
+      if (!exists) refSet.add(wrapNodeRef(node));
+    }
+
+    if (canRequestNow(key)) {
       queuedTexts.add(key);
       if (!flushTimer) {
         flushTimer = setTimeout(flush, 100);
@@ -192,9 +250,11 @@ export function createDynamicQueue({ sendRequest, onApplyNodes }) {
 
     for (const key of Object.keys(translations)) {
       appliedKeys++;
-      const nodeSet = pendingByText.get(key);
-      if (nodeSet) {
-        for (const node of nodeSet) {
+      requestHistory.delete(key);
+      const refSet = pendingByText.get(key);
+      if (refSet) {
+        for (const ref of refSet) {
+          const node = ref.deref();
           if (node && node.isConnected !== false) {
             nodesToUpdate.add(node);
           }
@@ -220,10 +280,12 @@ export function createDynamicQueue({ sendRequest, onApplyNodes }) {
     isEligible,
     enqueue,
     receiveTranslations,
+    pruneStalePending,
+    getPendingSize: () => pendingByText.size,
     clearPending() {
       pendingByText.clear();
       queuedTexts.clear();
-      requestedTexts.clear();
+      requestHistory.clear();
     },
   };
 }

@@ -4,31 +4,102 @@ import { smartFetch } from './proxy.js';
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_CACHE = 2000;
-const MAX_CONCURRENCY = 3;
+const MAX_BATCH_SIZE = 30;
+const MAX_GLOBAL_CONCURRENCY = 3;
 
 const LLM_SYSTEM_PROMPT =
-  'You translate short English UI prompts, command approval titles, and security risk descriptions in an AI coding IDE into concise, natural Simplified Chinese. Preserve CLI commands, file paths, flags, and technical terms (e.g., macOS, LaunchAgent, CDP, JSON, DOM, localStorage, MutationObserver) as-is. Return ONLY a JSON object mapping each exact input string to its Chinese translation.';
+  'You translate short English UI prompts, command approval titles, and security risk descriptions in an AI coding IDE into concise, natural Simplified Chinese. Preserve all placeholder tokens like AGPH0X, AGPH1X, CLI commands, file paths, flags, and technical terms (e.g., macOS, LaunchAgent, CDP, JSON, DOM, localStorage, MutationObserver) exactly as-is. Return ONLY a JSON object mapping each exact input string to its Chinese translation.';
+
+const SENSITIVE_TOKEN_RE =
+  /`[^`]{1,120}`|~\/[^\s,;)'"`]+|\/(?:Users|home|Applications|Library|etc|var|tmp|opt|usr)\/[^\s,;)'"`]+|[A-Za-z]:\\[^\s,;)'"`]+|\b[\w.-]+(?:\/[\w.-]+)+\b|'[^'\n]{3,80}'/g;
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS, proxy = '') {
   return await smartFetch(url, options, { timeoutMs, proxy });
 }
 
-function normalizeTranslation(str) {
+export function normalizeTranslation(str) {
   return String(str || '')
     .trim()
     .replace(/反重力/g, 'Antigravity');
 }
 
-function isValidDynamicKey(text) {
+export function normalizeMaxCacheSize(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX_CACHE;
+  return Math.floor(n);
+}
+
+export function isValidDynamicKey(text) {
   if (typeof text !== 'string') return false;
   const t = text.trim();
   if (!t || t.length > 600) return false;
   const words = t.split(/\s+/);
-  if (/^(?:Gemini|Claude|GPT|OpenAI|Anthropic|Google|Llama|DeepSeek|Qwen|Mistral|Orchestrator)\b/i.test(t) && words.length < 6) {
+  if (
+    /^(?:Gemini|Claude|GPT|OpenAI|Anthropic|Google|Llama|DeepSeek|Qwen|Mistral|Orchestrator)\b/i.test(
+      t
+    ) &&
+    words.length < 6
+  ) {
     return false;
   }
   if (/^Allow\s+.+\?$/.test(t) && words.length >= 3) return true;
   return t.length >= 28 && words.length >= 5;
+}
+
+/**
+ * Redact local paths, inline backtick code, and quoted commands into stable
+ * alphanumeric placeholders (AGPH0X, AGPH1X...) before sending to external translators.
+ */
+export function redactSensitiveTokens(text) {
+  const tokens = [];
+  const redacted = String(text).replace(SENSITIVE_TOKEN_RE, (match) => {
+    const idx = tokens.length;
+    tokens.push(match);
+    return `AGPH${idx}X`;
+  });
+  return { redacted, tokens };
+}
+
+/**
+ * Restore all redacted placeholders and strictly verify completeness.
+ * If any placeholder was dropped or corrupted by the translator, return null
+ * so the caller safely discards the translation and preserves original text.
+ */
+export function restoreSensitiveTokens(translated, tokens) {
+  if (typeof translated !== 'string' || !translated.trim()) return null;
+  if (!tokens || tokens.length === 0) return translated.trim();
+
+  let out = translated;
+  for (let i = 0; i < tokens.length; i++) {
+    const tokenRe = new RegExp(`AGPH${i}X`, 'gi');
+    if (!tokenRe.test(out)) {
+      return null;
+    }
+    out = out.replace(new RegExp(`AGPH${i}X`, 'gi'), () => tokens[i]);
+  }
+  // Ensure no orphan placeholder tokens remain
+  if (/AGPH\d+X/i.test(out)) {
+    return null;
+  }
+  return out.trim();
+}
+
+function createSemaphore(maxConcurrent) {
+  let active = 0;
+  const waiters = [];
+  return async function withPermit(fn) {
+    if (active >= maxConcurrent) {
+      await new Promise((resolve) => waiters.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = waiters.shift();
+      if (next) next();
+    }
+  };
 }
 
 async function translateViaGoogle(text, timeoutMs, proxy) {
@@ -60,7 +131,7 @@ async function translateViaMyMemory(text, timeoutMs, proxy) {
   if (typeof translated !== 'string' || !translated.trim()) {
     throw new Error('Empty MyMemory result');
   }
-  return translated.trim();
+  return normalizeTranslation(translated);
 }
 
 function parseJsonObjectFromLlm(content) {
@@ -127,16 +198,20 @@ async function translateBatchViaGemini(texts, cfg) {
 }
 
 /**
- * Create a daemon-side dynamic translator with persistent local disk cache
- * (dicts/_dynamic_cache.json), in-flight deduplication, and multi-provider support.
+ * Create a daemon-side dynamic translator with:
+ * - Persistent local disk cache (dicts/_dynamic_cache.json) with safe size bounds
+ * - Strict backend validation reusing isValidDynamicKey() + per-call batch cap
+ * - Global concurrency semaphore across concurrent calls
+ * - Placeholder redaction + strict restoration integrity verification
+ * - Zero silent privacy downgrade (no automatic fallback to MyMemory or from LLM to free APIs)
  */
 export function createDynamicTranslator({ rootDir, config = {}, customTranslateFn = null }) {
   const cachePath = path.join(rootDir, 'dicts', '_dynamic_cache.json');
   const cache = new Map();
   const inFlight = new Map();
+  const withGlobalPermit = createSemaphore(MAX_GLOBAL_CONCURRENCY);
   let saveTimer = null;
 
-  // Load existing local cache (auto-pruning any legacy short/model-name entries)
   let prunedOnLoad = false;
   if (fs.existsSync(cachePath)) {
     try {
@@ -155,7 +230,7 @@ export function createDynamicTranslator({ rootDir, config = {}, customTranslateF
     }
   }
   if (prunedOnLoad) {
-    flushCacheSync();
+    flushCacheSync(config?.dynamicTranslate?.maxCacheSize);
   }
 
   function scheduleSave(maxCacheSize = DEFAULT_MAX_CACHE) {
@@ -167,8 +242,10 @@ export function createDynamicTranslator({ rootDir, config = {}, customTranslateF
   }
 
   function flushCacheSync(maxCacheSize = DEFAULT_MAX_CACHE) {
-    while (cache.size > maxCacheSize) {
+    const limit = normalizeMaxCacheSize(maxCacheSize);
+    while (cache.size > limit && cache.size > 0) {
       const oldestKey = cache.keys().next().value;
+      if (oldestKey === undefined) break;
       cache.delete(oldestKey);
     }
     try {
@@ -180,17 +257,24 @@ export function createDynamicTranslator({ rootDir, config = {}, customTranslateF
     }
   }
 
-  async function translateSingleFree(text, cfg) {
+  async function translateSingleWithRedaction(originalText, provider, cfg) {
+    const { redacted, tokens } = redactSensitiveTokens(originalText);
     const timeoutMs = cfg.timeoutMs || DEFAULT_TIMEOUT_MS;
     const proxy = cfg.proxy || '';
-    if (customTranslateFn) {
-      return await customTranslateFn(text);
-    }
-    try {
-      return await translateViaGoogle(text, timeoutMs, proxy);
-    } catch {
-      return await translateViaMyMemory(text, timeoutMs, proxy);
-    }
+
+    const rawTranslated = await withGlobalPermit(async () => {
+      if (customTranslateFn) {
+        return await customTranslateFn(redacted);
+      }
+      if (provider === 'mymemory') {
+        return await translateViaMyMemory(redacted, timeoutMs, proxy);
+      }
+      return await translateViaGoogle(redacted, timeoutMs, proxy);
+    });
+
+    const restored = restoreSensitiveTokens(normalizeTranslation(rawTranslated), tokens);
+    if (!restored || restored === originalText) return null;
+    return restored;
   }
 
   async function translateTexts(rawTexts, runtimeConfig = config) {
@@ -199,13 +283,14 @@ export function createDynamicTranslator({ rootDir, config = {}, customTranslateF
       return { translations: {}, fromCache: 0, fetched: 0 };
     }
 
-    const maxCacheSize = cfg.maxCacheSize || DEFAULT_MAX_CACHE;
+    const maxCacheSize = normalizeMaxCacheSize(cfg.maxCacheSize);
     const unique = [];
     const seen = new Set();
     for (const t of Array.isArray(rawTexts) ? rawTexts : []) {
+      if (unique.length >= MAX_BATCH_SIZE) break;
       if (typeof t !== 'string') continue;
       const trimmed = t.trim();
-      if (!trimmed || trimmed.length > 600 || seen.has(trimmed)) continue;
+      if (!isValidDynamicKey(trimmed) || seen.has(trimmed)) continue;
       seen.add(trimmed);
       unique.push(trimmed);
     }
@@ -230,58 +315,65 @@ export function createDynamicTranslator({ rootDir, config = {}, customTranslateF
     let fetched = 0;
     const provider = cfg.provider || 'google';
 
-    // Batch LLM path when configured with API key
-    if ((provider === 'openai' || provider === 'gemini') && cfg.apiKey && !customTranslateFn) {
+    // Explicit LLM provider path: NEVER silently fall back to public free translators on failure
+    if ((provider === 'openai' || provider === 'gemini') && !customTranslateFn) {
+      if (!cfg.apiKey) {
+        console.warn(`[ag-zh] 动态翻译已配置为 ${provider}，但未设置 apiKey，跳过本次翻译。`);
+        return { translations, fromCache, fetched: 0 };
+      }
       try {
-        const batchResult =
+        const redactedItems = misses.map((orig) => ({
+          orig,
+          ...redactSensitiveTokens(orig),
+        }));
+        const batchResult = await withGlobalPermit(async () =>
           provider === 'gemini'
-            ? await translateBatchViaGemini(misses, cfg)
-            : await translateBatchViaOpenAI(misses, cfg);
-        for (const text of misses) {
-          const val = batchResult[text];
-          if (typeof val === 'string' && val.trim() && val.trim() !== text) {
-            cache.set(text, val.trim());
-            translations[text] = val.trim();
+            ? await translateBatchViaGemini(
+                redactedItems.map((i) => i.redacted),
+                cfg
+              )
+            : await translateBatchViaOpenAI(
+                redactedItems.map((i) => i.redacted),
+                cfg
+              )
+        );
+        for (const item of redactedItems) {
+          const rawVal = batchResult[item.redacted] ?? batchResult[item.orig];
+          if (typeof rawVal !== 'string') continue;
+          const restored = restoreSensitiveTokens(normalizeTranslation(rawVal), item.tokens);
+          if (restored && restored !== item.orig) {
+            if (maxCacheSize > 0) cache.set(item.orig, restored);
+            translations[item.orig] = restored;
             fetched++;
           }
         }
-        if (fetched > 0) scheduleSave(maxCacheSize);
-        return { translations, fromCache, fetched };
+        if (fetched > 0 && maxCacheSize > 0) scheduleSave(maxCacheSize);
       } catch (err) {
-        console.warn(`[ag-zh] ${provider} 翻译失败，回退至免费轻量接口: ${err.message}`);
+        console.warn(`[ag-zh] ${provider} 动态翻译失败（已禁止隐式回退公共接口）: ${err.message}`);
       }
+      return { translations, fromCache, fetched };
     }
 
-    // Concurrent single-text path with in-flight deduplication (Google -> MyMemory fallback)
-    const queue = [...misses];
-    async function worker() {
-      while (queue.length > 0) {
-        const text = queue.shift();
-        if (!text) continue;
+    // Single-text path (google or explicit mymemory) with in-flight deduplication + global concurrency cap
+    await Promise.all(
+      misses.map(async (text) => {
         let promise = inFlight.get(text);
         if (!promise) {
-          promise = translateSingleFree(text, cfg)
+          promise = translateSingleWithRedaction(text, provider, cfg)
             .catch(() => null)
             .finally(() => inFlight.delete(text));
           inFlight.set(text, promise);
         }
         const translated = await promise;
-        if (typeof translated === 'string' && translated.trim() && translated.trim() !== text) {
-          cache.set(text, translated.trim());
-          translations[text] = translated.trim();
+        if (typeof translated === 'string' && translated && translated !== text) {
+          if (maxCacheSize > 0) cache.set(text, translated);
+          translations[text] = translated;
           fetched++;
         }
-      }
-    }
+      })
+    );
 
-    const workers = [];
-    const workerCount = Math.min(MAX_CONCURRENCY, misses.length);
-    for (let i = 0; i < workerCount; i++) {
-      workers.push(worker());
-    }
-    await Promise.all(workers);
-
-    if (fetched > 0) {
+    if (fetched > 0 && maxCacheSize > 0) {
       scheduleSave(maxCacheSize);
     }
 

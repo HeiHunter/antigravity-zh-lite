@@ -119,8 +119,15 @@ export function createMatcher(dict = {}) {
     return null;
   }
 
+  function isDynamicHit(rawText) {
+    if (typeof rawText !== 'string' || !rawText) return false;
+    const trimmed = rawText.trim();
+    return !exactMap.has(trimmed) && dynamicMap.has(trimmed);
+  }
+
   return {
     translate,
+    isDynamicHit,
     addDynamicBatch,
     getDynamicEntries: () => Object.fromEntries(dynamicMap.entries()),
     getDynamicSize: () => dynamicMap.size,

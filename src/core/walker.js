@@ -44,6 +44,7 @@ export function createDomTranslator(matcher, options = {}) {
   const appliedTextMap = new WeakMap();
   const originalAttrMap = new WeakMap();
   const appliedAttrMap = new WeakMap();
+  const syntheticTitleMap = new WeakMap();
 
   let isApplying = false;
   let translatedCount = 0;
@@ -108,6 +109,21 @@ export function createDomTranslator(matcher, options = {}) {
       try {
         appliedTextMap.set(node, translated);
         node.nodeValue = translated;
+        // Tier 2 UX: for machine-translated dynamic sentences, expose original English on hover
+        // only when the parent element does not already define its own title attribute.
+        if (
+          parent &&
+          typeof activeMatcher.isDynamicHit === 'function' &&
+          activeMatcher.isDynamicHit(sourceText) &&
+          typeof parent.getAttribute === 'function' &&
+          typeof parent.setAttribute === 'function' &&
+          !parent.getAttribute('title') &&
+          !syntheticTitleMap.has(parent)
+        ) {
+          const origHint = sourceText.trim();
+          parent.setAttribute('title', origHint);
+          syntheticTitleMap.set(parent, origHint);
+        }
         translatedCount++;
       } finally {
         isApplying = false;
@@ -134,6 +150,7 @@ export function createDomTranslator(matcher, options = {}) {
 
     for (let i = 0; i < TRANSLATABLE_ATTRS.length; i++) {
       const attr = TRANSLATABLE_ATTRS[i];
+      if (attr === 'title' && syntheticTitleMap.has(el)) continue;
       const current = el.getAttribute(attr);
       if (!current) continue;
 
@@ -216,6 +233,18 @@ export function createDomTranslator(matcher, options = {}) {
           }
         }
       } else if (node.nodeType === 1) {
+        const synTitle = syntheticTitleMap.get(node);
+        if (synTitle !== undefined && typeof node.removeAttribute === 'function') {
+          if (node.getAttribute('title') === synTitle) {
+            isApplying = true;
+            try {
+              node.removeAttribute('title');
+            } finally {
+              isApplying = false;
+            }
+          }
+          syntheticTitleMap.delete(node);
+        }
         const origMap = originalAttrMap.get(node);
         const appMap = appliedAttrMap.get(node);
         if (!origMap || !appMap) return;
