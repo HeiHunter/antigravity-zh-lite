@@ -1,0 +1,45 @@
+{
+  "name": "antigravity-zh-lite",
+  "version": "1.0.0",
+  "description": "Lightweight, zero-dependency Chinese localization plugin for Google Antigravity 2.0 desktop client (macOS & Windows) via non-invasive CDP injection.",
+  "author": "HeiHunter",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/HeiHunter/antigravity-zh-lite#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeiHunter/antigravity-zh-lite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HeiHunter/antigravity-zh-lite/issues"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "ag-zh": "./bin/ag-zh.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "validate": "node scripts/validate-dicts.js",
+    "start": "node bin/ag-zh.js",
+    "start:restart": "node bin/ag-zh.js --restart",
+    "install:service": "node bin/ag-zh.js install",
+    "uninstall:service": "node bin/ag-zh.js uninstall",
+    "status": "node bin/ag-zh.js status",
+    "pack:release": "node scripts/pack-release.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "antigravity",
+    "google-antigravity",
+    "chinese",
+    "zh-cn",
+    "i18n",
+    "localization",
+    "cdp",
+    "electron",
+    "macos",
+    "windows"
+  ]
+}

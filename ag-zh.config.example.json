@@ -1,0 +1,24 @@
+{
+  "port": 9229,
+  "app": "",
+  "autoFollow": true,
+  "watchDicts": true,
+  "dynamicTranslate": {
+    "enabled": true,
+    "provider": "google",
+    "proxy": "",
+    "maxCacheSize": 2000,
+    "timeoutMs": 5000,
+    "apiBaseUrl": "",
+    "apiKey": "",
+    "model": ""
+  },
+  "upload": {
+    "mode": "local",
+    "mergeLocal": true,
+    "webhookUrl": "",
+    "webhookHeaders": {},
+    "githubRepo": "",
+    "githubToken": ""
+  }
+}

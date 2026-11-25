@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+dicts/_collected.json
+dicts/_dynamic_cache.json
+dicts/_screen_scan.json
+ag-zh.config.json
+Antigravity 中文版.app/
+Antigravity 中文版.lnk
+.DS_Store
+*.log

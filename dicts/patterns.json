@@ -1,0 +1,408 @@
+{
+  "ignoreSelectors": [
+    ".markdown-body",
+    ".prose",
+    "[data-message-content]",
+    "[data-testid=\"message-content\"]",
+    ".cm-content",
+    ".view-lines"
+  ],
+  "patterns": [
+    {
+      "hint": "file",
+      "regex": "^(\\d+)\\s+files?\\s+changed$",
+      "flags": "i",
+      "replace": "$1 个文件已变更"
+    },
+    {
+      "hint": "steps",
+      "regex": "^(\\d+)\\/(\\d+)\\s+steps\\.\\s+Show plan$",
+      "flags": "i",
+      "replace": "已完成 $1/$2 步 · 查看计划"
+    },
+    {
+      "hint": "step",
+      "regex": "^(\\d+)\\/(\\d+)\\s+steps?$",
+      "flags": "i",
+      "replace": "已完成 $1/$2 步"
+    },
+    {
+      "hint": "step",
+      "regex": "^(\\d+)\\s+of\\s+(\\d+)\\s+steps?$",
+      "flags": "i",
+      "replace": "已完成 $1 / $2 步"
+    },
+    {
+      "hint": "turn",
+      "regex": "^Turn\\s+(\\d+)\\s+of\\s+(\\d+)$",
+      "flags": "i",
+      "replace": "第 $1 / $2 轮"
+    },
+    {
+      "hint": "active conversation",
+      "regex": "^(\\d+)\\s+active\\s+conversations?$",
+      "flags": "i",
+      "replace": "$1 个进行中的对话"
+    },
+    {
+      "hint": "breakdown",
+      "regex": "^Show\\s+(\\d+)\\s+breakdowns?$",
+      "flags": "i",
+      "replace": "展开 $1 项明细"
+    },
+    {
+      "hint": "older messages",
+      "regex": "^Load older messages, showing (\\d+) of (\\d+)$",
+      "flags": "",
+      "replace": "加载更早的消息（已显示 $1 / $2）"
+    },
+    {
+      "hint": "older messages",
+      "regex": "^Loading older messages…, showing (\\d+) of (\\d+)$",
+      "flags": "",
+      "replace": "正在加载更早的消息…（已显示 $1 / $2）"
+    },
+    {
+      "hint": "older messages",
+      "regex": "^No more older messages, showing (\\d+) of (\\d+)$",
+      "flags": "",
+      "replace": "没有更早的消息了（已显示 $1 / $2）"
+    },
+    {
+      "hint": "worked for",
+      "regex": "^Worked for (\\d+)s$",
+      "flags": "i",
+      "replace": "已执行 $1 秒"
+    },
+    {
+      "hint": "worked for",
+      "regex": "^Worked for (\\d+)m$",
+      "flags": "i",
+      "replace": "已执行 $1 分钟"
+    },
+    {
+      "hint": "worked for",
+      "regex": "^Worked for (\\d+)m\\s*(\\d+)s$",
+      "flags": "i",
+      "replace": "已执行 $1 分 $2 秒"
+    },
+    {
+      "hint": "worked for",
+      "regex": "^Worked for (\\d+)h\\s*(\\d+)m$",
+      "flags": "i",
+      "replace": "已执行 $1 小时 $2 分钟"
+    },
+    {
+      "hint": "thinking for",
+      "regex": "^Thinking for (\\d+)s$",
+      "flags": "i",
+      "replace": "已思考 $1 秒"
+    },
+    {
+      "hint": "thinking for",
+      "regex": "^Thinking for (\\d+)m$",
+      "flags": "i",
+      "replace": "已思考 $1 分钟"
+    },
+    {
+      "hint": "skills:",
+      "regex": "^Skills:\\s*([\\d,]+)\\s*tokens?$",
+      "flags": "i",
+      "replace": "技能：$1 tokens"
+    },
+    {
+      "hint": "subagent",
+      "regex": "^(\\d+)\\s+subagents?$",
+      "flags": "i",
+      "replace": "$1 个子智能体"
+    },
+    {
+      "hint": "task",
+      "regex": "^(\\d+)\\s+(?:background\\s+)?tasks?$",
+      "flags": "i",
+      "replace": "$1 个后台任务"
+    },
+    {
+      "hint": "terminal",
+      "regex": "^(\\d+)\\s+terminals?$",
+      "flags": "i",
+      "replace": "$1 个终端"
+    },
+    {
+      "hint": "artifact",
+      "regex": "^(\\d+)\\s+artifacts?$",
+      "flags": "i",
+      "replace": "$1 个产物文档"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)s\\s+ago$",
+      "flags": "i",
+      "replace": "$1 秒前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)m\\s+ago$",
+      "flags": "i",
+      "replace": "$1 分钟前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)h\\s+ago$",
+      "flags": "i",
+      "replace": "$1 小时前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)d\\s+ago$",
+      "flags": "i",
+      "replace": "$1 天前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)w\\s+ago$",
+      "flags": "i",
+      "replace": "$1 周前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)mo\\s+ago$",
+      "flags": "i",
+      "replace": "$1 个月前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)y\\s+ago$",
+      "flags": "i",
+      "replace": "$1 年前"
+    },
+    {
+      "hint": "mo",
+      "regex": "^(\\d+)mo$",
+      "flags": "i",
+      "replace": "$1 个月前"
+    },
+    {
+      "hint": "w",
+      "regex": "^(\\d+)w$",
+      "flags": "i",
+      "replace": "$1 周前"
+    },
+    {
+      "hint": "y",
+      "regex": "^(\\d+)y$",
+      "flags": "i",
+      "replace": "$1 年前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^Updated\\s+(\\d+)\\s*s\\s+ago$",
+      "flags": "i",
+      "replace": "$1 秒前更新"
+    },
+    {
+      "hint": "ago",
+      "regex": "^Updated\\s+(\\d+)\\s*m\\s+ago$",
+      "flags": "i",
+      "replace": "$1 分钟前更新"
+    },
+    {
+      "hint": "ago",
+      "regex": "^Updated\\s+(\\d+)\\s*h\\s+ago$",
+      "flags": "i",
+      "replace": "$1 小时前更新"
+    },
+    {
+      "hint": "ago",
+      "regex": "^Updated\\s+(\\d+)\\s*d\\s+ago$",
+      "flags": "i",
+      "replace": "$1 天前更新"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)\\s+minutes?\\s+ago$",
+      "flags": "i",
+      "replace": "$1 分钟前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)\\s+hours?\\s+ago$",
+      "flags": "i",
+      "replace": "$1 小时前"
+    },
+    {
+      "hint": "ago",
+      "regex": "^(\\d+)\\s+days?\\s+ago$",
+      "flags": "i",
+      "replace": "$1 天前"
+    },
+    {
+      "hint": "just now",
+      "regex": "^Just\\s+now$",
+      "flags": "i",
+      "replace": "刚刚"
+    },
+    {
+      "hint": "your plan:",
+      "regex": "^Your plan:\\s*(.+)$",
+      "flags": "",
+      "replace": "当前套餐：$1"
+    },
+    {
+      "hint": "send feedback as",
+      "regex": "^Send feedback as\\s+(.+)$",
+      "flags": "",
+      "replace": "以 $1 身份提交反馈"
+    },
+    {
+      "hint": "select model",
+      "regex": "^Select model, current:\\s*(.+)$",
+      "flags": "",
+      "replace": "选择模型，当前：$1"
+    },
+    {
+      "hint": "cannot be changed",
+      "regex": "^Model:\\s*(.+),\\s*Model cannot be changed while the agent is running$",
+      "flags": "",
+      "replace": "模型：$1（智能体运行期间无法切换模型）"
+    },
+    {
+      "hint": "permissions preset",
+      "regex": "^Agent permissions preset selector, current:\\s*(.+)$",
+      "flags": "",
+      "replace": "智能体权限预设，当前：$1"
+    },
+    {
+      "hint": "cannot be changed",
+      "regex": "^Agent permissions preset:\\s*(.+),\\s*Permissions cannot be changed while the agent is running$",
+      "flags": "",
+      "replace": "智能体权限预设：$1（智能体运行期间无法更改权限）"
+    },
+    {
+      "hint": "5-hour limit",
+      "regex": "^You have used some of your 5-hour limit, it will fully refresh in (.+)\\.$",
+      "flags": "",
+      "replace": "你已使用部分 5 小时配额，将在 $1 后完全刷新。"
+    },
+    {
+      "hint": "weekly limit",
+      "regex": "^You have used some of your weekly limit, it will fully refresh in (.+)\\.$",
+      "flags": "",
+      "replace": "你已使用部分每周配额，将在 $1 后完全刷新。"
+    },
+    {
+      "hint": "add shortcut for",
+      "regex": "^Add shortcut for (.+)$",
+      "flags": "",
+      "replace": "添加快捷键：$1"
+    },
+    {
+      "hint": "remove shortcut",
+      "regex": "^Remove shortcut (.+) for (.+)$",
+      "flags": "",
+      "replace": "移除 $2 的快捷键 $1"
+    },
+    {
+      "hint": "always allow",
+      "regex": "^Yes, and always allow\\s+(['\"`][^'\"`]+['\"`])\\s+in this conversation$",
+      "flags": "",
+      "replace": "是，并始终允许 $1（仅当前对话）"
+    },
+    {
+      "hint": "always allow",
+      "regex": "^Yes, and always allow\\s+(['\"`][^'\"`]+['\"`])$",
+      "flags": "",
+      "replace": "是，并始终允许 $1"
+    },
+    {
+      "hint": "shortcut",
+      "regex": "^Shortcut (.+) for (.+)$",
+      "flags": "",
+      "replace": "$2 的快捷键 $1"
+    },
+    {
+      "hint": "what should we build",
+      "regex": "^Hey\\s+(.+),\\s*what should we build today\\?$",
+      "flags": "",
+      "replace": "你好 $1，今天想一起构建点什么？"
+    },
+    {
+      "hint": "welcome back",
+      "regex": "^Welcome back,\\s*(.+?)\\.\\s*Where should we pick up\\?$",
+      "flags": "",
+      "replace": "欢迎回来，$1。我们从哪里继续？"
+    },
+    {
+      "hint": "steps done",
+      "regex": "^Plan,\\s*(\\d+)\\s+of\\s+(\\d+)\\s+steps?\\s+done$",
+      "flags": "i",
+      "replace": "计划：已完成 $1 / $2 步"
+    },
+    {
+      "hint": "select project",
+      "regex": "^Select project, current:\\s*(.+)$",
+      "flags": "",
+      "replace": "选择项目，当前：$1"
+    },
+    {
+      "hint": "where the agent runs",
+      "regex": "^Where the agent runs, current:\\s*(.+)$",
+      "flags": "",
+      "replace": "智能体运行位置，当前：$1"
+    },
+    {
+      "hint": "models within this group",
+      "regex": "^Models within this group:\\s*(.+)$",
+      "flags": "",
+      "replace": "该分组包含模型：$1"
+    },
+    {
+      "hint": "voice",
+      "regex": "^(.+),\\s*voice\\s+(\\d+)\\s+of\\s+(\\d+)$",
+      "flags": "i",
+      "replace": "$1（第 $2 / $3 个音色）"
+    },
+    {
+      "hint": "more",
+      "regex": "^See\\s+(\\d+)\\s+more$",
+      "flags": "i",
+      "replace": "展开其余 $1 项"
+    },
+    {
+      "hint": "see more in",
+      "regex": "^See more in\\s+(.+)$",
+      "flags": "",
+      "replace": "在「$1」中查看更多"
+    },
+    {
+      "hint": "see less in",
+      "regex": "^See less in\\s+(.+)$",
+      "flags": "",
+      "replace": "在「$1」中收起"
+    },
+    {
+      "hint": "plugins in",
+      "regex": "^Plugins in\\s+(.+)$",
+      "flags": "",
+      "replace": "「$1」分类插件"
+    },
+    {
+      "hint": "details for",
+      "regex": "^Details for\\s+(.+)$",
+      "flags": "",
+      "replace": "查看 $1 详情"
+    },
+    {
+      "hint": "install ",
+      "regex": "^Install\\s+(.+)$",
+      "flags": "",
+      "replace": "安装 $1"
+    },
+    {
+      "hint": "add ",
+      "regex": "^Add\\s+([A-Z0-9][\\w.-]+)$",
+      "flags": "",
+      "replace": "添加 $1"
+    }
+  ]
+}
