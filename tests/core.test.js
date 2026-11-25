@@ -943,13 +943,42 @@ test('translator: no implicit cross-provider fallback and bounded semaphore queu
     assert.ok(!requestedUrls.some((u) => u.includes('translate.googleapis.com') || u.includes('mymemory')));
 
     requestedUrls.length = 0;
-    // Google failure must NEVER silently fall back to MyMemory
+    // Google failure must NEVER silently fall back to MyMemory (only same-vendor Google endpoints allowed)
     const rGoogle = await t.translateTexts([sample], {
       dynamicTranslate: { enabled: true, provider: 'google', proxy: 'none' },
     });
     assert.deepEqual(rGoogle.translations, {});
-    assert.ok(requestedUrls.length > 0 && requestedUrls.every((u) => u.includes('translate.googleapis.com')));
+    assert.ok(
+      requestedUrls.length > 0 &&
+        requestedUrls.every(
+          (u) => u.includes('translate.googleapis.com') || u.includes('clients5.google.com')
+        )
+    );
     assert.ok(!requestedUrls.some((u) => u.includes('mymemory')));
+
+    // Google client=gtx 429 seamlessly falls back to same-vendor clients5.google.com
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('translate.googleapis.com')) {
+        return { ok: false, status: 429, statusText: 'Too Many Requests', async text() { return '429'; } };
+      }
+      if (u.includes('clients5.google.com')) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          async text() {
+            return JSON.stringify(['该命令会安全修改工作区目录之外的文件。']);
+          },
+        };
+      }
+      throw new Error(`Unexpected host: ${u}`);
+    };
+    const rGoogleFallback = await t.translateTexts([sample], {
+      dynamicTranslate: { enabled: true, provider: 'google', proxy: 'none' },
+    });
+    assert.equal(rGoogleFallback.fetched, 1);
+    assert.equal(rGoogleFallback.translations[sample], '该命令会安全修改工作区目录之外的文件。');
 
     // Semaphore rejects excess tasks once waiting queue reaches maxQueueSize
     const withPermit = createSemaphore(1, 2);

@@ -106,11 +106,19 @@ export function createSemaphore(maxConcurrent, maxQueueSize = MAX_GLOBAL_QUEUE) 
   };
 }
 
-async function translateViaGoogle(text, timeoutMs, proxy) {
+const GOOGLE_BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+
+async function translateViaGoogleGtx(text, timeoutMs, proxy) {
   const url =
     'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' +
     encodeURIComponent(text);
-  const res = await fetchWithTimeout(url, {}, timeoutMs, proxy);
+  const res = await fetchWithTimeout(
+    url,
+    { headers: { 'User-Agent': GOOGLE_BROWSER_UA } },
+    timeoutMs,
+    proxy
+  );
   if (!res.ok) throw new Error(`Google Translate HTTP ${res.status}`);
   const data = await res.json();
   if (!Array.isArray(data) || !Array.isArray(data[0])) {
@@ -123,6 +131,47 @@ async function translateViaGoogle(text, timeoutMs, proxy) {
   );
   if (!translated) throw new Error('Empty Google Translate result');
   return translated;
+}
+
+async function translateViaGoogleChromeExt(text, timeoutMs, proxy) {
+  const url =
+    'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=en&tl=zh-CN&q=' +
+    encodeURIComponent(text);
+  const res = await fetchWithTimeout(
+    url,
+    { headers: { 'User-Agent': GOOGLE_BROWSER_UA } },
+    timeoutMs,
+    proxy
+  );
+  if (!res.ok) throw new Error(`Google Translate (chrome-ex) HTTP ${res.status}`);
+  const data = await res.json();
+  if (!Array.isArray(data)) {
+    throw new Error('Unexpected Google Translate (chrome-ex) response');
+  }
+  const translated = normalizeTranslation(
+    data
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (Array.isArray(item) && typeof item[0] === 'string') return item[0];
+        return '';
+      })
+      .join('')
+  );
+  if (!translated) throw new Error('Empty Google Translate (chrome-ex) result');
+  return translated;
+}
+
+/**
+ * Translate via Google Translate only (same-vendor fallback from client=gtx to
+ * Google's own dict-chrome-ex endpoint when client=gtx hits per-IP 429 burst limits).
+ * Never falls back to third-party services such as MyMemory.
+ */
+async function translateViaGoogle(text, timeoutMs, proxy) {
+  try {
+    return await translateViaGoogleGtx(text, timeoutMs, proxy);
+  } catch {
+    return await translateViaGoogleChromeExt(text, timeoutMs, proxy);
+  }
 }
 
 async function translateViaMyMemory(text, timeoutMs, proxy) {
