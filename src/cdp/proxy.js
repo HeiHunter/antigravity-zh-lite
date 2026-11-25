@@ -26,7 +26,6 @@ export function parseWinRegProxy(enableOut, serverOut) {
   if (!m) return null;
   const raw = m[1].trim();
   if (!raw) return null;
-  // Handle per-protocol format like "http=127.0.0.1:7890;https=127.0.0.1:7890"
   if (raw.includes('=')) {
     const httpsMatch = /https=([^;\s]+)/i.exec(raw);
     const httpMatch = /http=([^;\s]+)/i.exec(raw);
@@ -78,25 +77,72 @@ export function detectSystemProxy(explicitProxy = '') {
   return detected;
 }
 
+function wrapBufferedResponse(status, statusText, text) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: statusText || '',
+    async json() {
+      return JSON.parse(text);
+    },
+    async text() {
+      return text;
+    },
+  };
+}
+
 /**
  * Zero-dependency HTTPS request via HTTP CONNECT proxy tunnel.
+ * Ensures underlying connectReq, tunnel socket, and https request are all destroyed on timeout or error.
  */
-function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs = 5000) {
+export function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrlStr);
     const proxy = new URL(proxyUrlStr);
     const targetPort = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
 
     let settled = false;
-    const done = (fn, val) => {
+    let connectReq = null;
+    let tunnelSocket = null;
+    let httpsReq = null;
+
+    const cleanupResources = () => {
+      if (httpsReq) {
+        try {
+          httpsReq.destroy();
+        } catch {
+          // ignore
+        }
+        httpsReq = null;
+      }
+      if (tunnelSocket) {
+        try {
+          tunnelSocket.destroy();
+        } catch {
+          // ignore
+        }
+        tunnelSocket = null;
+      }
+      if (connectReq) {
+        try {
+          connectReq.destroy();
+        } catch {
+          // ignore
+        }
+        connectReq = null;
+      }
+    };
+
+    const done = (fn, val, destroySockets = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (destroySockets) cleanupResources();
       fn(val);
     };
 
     const timer = setTimeout(() => {
-      done(reject, new Error(`Proxy request timeout (${timeoutMs}ms)`));
+      done(reject, new Error(`Proxy request timeout (${timeoutMs}ms)`), true);
     }, timeoutMs);
 
     const proxyAuth =
@@ -110,7 +156,7 @@ function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs 
     const connectHeaders = { Host: `${target.hostname}:${targetPort}` };
     if (proxyAuth) connectHeaders['Proxy-Authorization'] = proxyAuth;
 
-    const connectReq = http.request({
+    connectReq = http.request({
       host: proxy.hostname,
       port: Number(proxy.port) || 80,
       method: 'CONNECT',
@@ -119,9 +165,13 @@ function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs 
     });
 
     connectReq.on('connect', (res, socket) => {
+      tunnelSocket = socket;
+      if (settled) {
+        cleanupResources();
+        return;
+      }
       if (res.statusCode !== 200) {
-        socket.destroy();
-        done(reject, new Error(`Proxy CONNECT failed: HTTP ${res.statusCode}`));
+        done(reject, new Error(`Proxy CONNECT failed: HTTP ${res.statusCode}`), true);
         return;
       }
 
@@ -131,7 +181,7 @@ function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs 
         headers['Content-Length'] = Buffer.byteLength(bodyStr, 'utf8');
       }
 
-      const req = https.request(
+      httpsReq = https.request(
         {
           socket,
           servername: target.hostname,
@@ -147,37 +197,26 @@ function requestViaHttpProxy(targetUrlStr, options = {}, proxyUrlStr, timeoutMs 
           httpRes.on('end', () => {
             const text = Buffer.concat(chunks).toString('utf8');
             const status = httpRes.statusCode || 0;
-            done(resolve, {
-              ok: status >= 200 && status < 300,
-              status,
-              statusText: httpRes.statusMessage || '',
-              async json() {
-                return JSON.parse(text);
-              },
-              async text() {
-                return text;
-              },
-            });
+            done(resolve, wrapBufferedResponse(status, httpRes.statusMessage, text), false);
           });
-          httpRes.on('error', (err) => done(reject, err));
+          httpRes.on('error', (err) => done(reject, err, true));
         }
       );
 
-      req.on('error', (err) => {
-        socket.destroy();
-        done(reject, err);
-      });
-      if (bodyStr) req.write(bodyStr);
-      req.end();
+      httpsReq.on('error', (err) => done(reject, err, true));
+      if (bodyStr) httpsReq.write(bodyStr);
+      httpsReq.end();
     });
 
-    connectReq.on('error', (err) => done(reject, err));
+    connectReq.on('error', (err) => done(reject, err, true));
     connectReq.end();
   });
 }
 
 /**
- * Fetch wrapper that automatically honors explicit proxy, env proxy, or macOS/Windows system HTTP proxy.
+ * Fetch wrapper that:
+ * 1. Automatically honors explicit proxy, env proxy, or macOS/Windows system HTTP proxy.
+ * 2. Covers BOTH response headers AND full response body read inside timeoutMs.
  */
 export async function smartFetch(url, options = {}, { timeoutMs = 5000, proxy = '' } = {}) {
   const proxyUrl = detectSystemProxy(proxy);
@@ -187,7 +226,9 @@ export async function smartFetch(url, options = {}, { timeoutMs = 5000, proxy = 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const text = await res.text();
+    return wrapBufferedResponse(res.status, res.statusText, text);
   } finally {
     clearTimeout(timer);
   }

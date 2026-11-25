@@ -9,9 +9,9 @@ import { createDynamicQueue } from '../src/core/dynamic.js';
 import { createDomTranslator } from '../src/core/walker.js';
 import { createCollector } from '../src/core/collector.js';
 import { isAntigravityUiTarget } from '../src/cdp/client.js';
-import { handleCollectedUpload } from '../src/cdp/uploader.js';
+import { formatUploadModeLabel, handleCollectedUpload, loadConfig } from '../src/cdp/uploader.js';
 import { createDynamicTranslator } from '../src/cdp/translator.js';
-import { parseMacScutilProxy, parseWinRegProxy } from '../src/cdp/proxy.js';
+import { parseMacScutilProxy, parseWinRegProxy, smartFetch } from '../src/cdp/proxy.js';
 import { createMacLauncherApp, generateLaunchAgentPlist } from '../src/macos/service.js';
 import { generateWinDaemonVbs, generateWinShortcutScript } from '../src/win/service.js';
 import { collectReleaseFiles } from '../scripts/pack-release.js';
@@ -247,6 +247,34 @@ test('uploader: saves and incrementally merges collected entries into dicts/_col
 
     const saved = JSON.parse(fs.readFileSync(path.join(tmpRoot, 'dicts', '_collected.json'), 'utf8'));
     assert.deepEqual(saved, { exact: { 'First Label': '', 'Second Label': '' } });
+
+    // Regression: mode === 'local' must NEVER trigger webhook even if webhookUrl is set
+    const resLocalWithWebhook = await handleCollectedUpload({
+      rootDir: tmpRoot,
+      payload: { exact: { 'Third Label': '' } },
+      config: {
+        upload: {
+          mode: 'local',
+          mergeLocal: true,
+          webhookUrl: 'http://127.0.0.1:1/should-not-be-called',
+        },
+      },
+    });
+    assert.equal(resLocalWithWebhook.remoteStatus, 'local-only');
+    assert.equal(formatUploadModeLabel({ mode: 'local', webhookUrl: 'https://example.com' }), 'local');
+    assert.equal(
+      formatUploadModeLabel({ mode: 'webhook', webhookUrl: 'https://example.com' }),
+      'webhook (https://example.com)'
+    );
+
+    // Regression: corrupted ag-zh.config.json must fail-closed (disable online translation & remote upload)
+    fs.writeFileSync(path.join(tmpRoot, 'ag-zh.config.json'), '{ invalid json,,,', 'utf8');
+    const safeCfg = loadConfig(tmpRoot);
+    assert.equal(safeCfg.dynamicTranslate.enabled, false);
+    assert.equal(safeCfg.autoFollow, false);
+    assert.equal(safeCfg.upload.mode, 'local');
+    assert.equal(safeCfg.upload.webhookUrl, '');
+    assert.ok(safeCfg._configError);
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
@@ -523,6 +551,29 @@ test('proxy parser: extracts macOS scutil and Windows registry HTTP proxies', ()
     ),
     null
   );
+});
+
+test('smartFetch: direct request timeout covers slow response body read', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, { signal }) => ({
+    status: 200,
+    statusText: 'OK',
+    text() {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('Body read aborted by timeout')), {
+          once: true,
+        });
+      });
+    },
+  });
+  try {
+    await assert.rejects(
+      () => smartFetch('http://example.invalid/slow-body', {}, { timeoutMs: 40 }),
+      /aborted by timeout/
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
 
 test('windows service: generates hidden VBS daemon launcher and native .lnk PowerShell script', () => {

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { detectWinAppPath, getAntigravityMainProcesses } from '../cdp/launcher.js';
 import { isAntigravityUiTarget, listCdpTargets } from '../cdp/client.js';
-import { loadConfig } from '../cdp/uploader.js';
+import { formatUploadModeLabel, loadConfig } from '../cdp/uploader.js';
 
 export const WIN_STARTUP_VBS = 'antigravity-zh-lite.vbs';
 export const WIN_SHORTCUT_NAME = 'Antigravity 中文版.lnk';
@@ -224,8 +224,6 @@ export async function getWinServiceStatus({ rootDir, port }) {
       config.dynamicTranslate?.enabled === false
         ? '关闭'
         : `开启 (${config.dynamicTranslate?.provider || 'google'})`,
-    uploadMode: config.upload?.webhookUrl
-      ? `webhook (${config.upload.webhookUrl})`
-      : config.upload?.mode || 'local',
+    uploadMode: formatUploadModeLabel(config.upload),
   };
 }
